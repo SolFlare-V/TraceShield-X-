@@ -84,93 +84,96 @@ export default function App() {
 
 
 
-      {/* Sidebar */}
-      <aside className={`main-sidebar flex flex-col border-r border-[#1E2D4A] bg-[#0D1323] transition-all duration-300 z-50 ${sidebarCollapsed ? 'collapsed' : ''}`}>
+      {/* Sidebar - Only show in App Mode */}
+      {view !== 'home' && (
+        <aside className={`main-sidebar flex flex-col border-r border-[#1E2D4A] bg-[#0D1323] transition-all duration-300 z-50 ${sidebarCollapsed ? 'collapsed' : ''}`}>
 
-        <div className="p-4 flex items-center gap-3 h-[70px] border-b border-[#1E2D4A] cursor-pointer" onClick={() => setView('home')}>
-          <div className="w-10 h-10 bg-[#00F0FF] rounded flex items-center justify-center flex-shrink-0 shadow-[0_0_15px_rgba(0,240,255,0.4)]">
-             <i className="ph ph-shield-checkered text-[#0D1323] text-2xl" />
-          </div>
-          {!sidebarCollapsed && (
-            <div className="overflow-hidden">
-               <h1 className="text-xl font-bold tracking-tight text-white m-0 whitespace-nowrap" style={{ textShadow: '0 0 10px #00F0FF', fontFamily: 'Rajdhani' }}>
-                TRACE<span className="text-[#00F0FF]">SHIELD</span>
-              </h1>
-              <div className="text-[9px] text-[#00F0FF] font-bold tracking-[3px] mono-text opacity-70">X.FORENSICS</div>
+          <div className="p-4 flex items-center gap-3 h-[70px] border-b border-[#1E2D4A]">
+            <div className="w-10 h-10 bg-[#00F0FF] rounded flex items-center justify-center flex-shrink-0 shadow-[0_0_15px_rgba(0,240,255,0.4)]">
+              <i className="ph ph-shield-checkered text-[#0D1323] text-2xl" />
             </div>
-          )}
-        </div>
+            {!sidebarCollapsed && (
+              <div className="overflow-hidden">
+                <h1 className="text-xl font-bold tracking-tight text-white m-0 whitespace-nowrap" style={{ textShadow: '0 0 10px #00F0FF', fontFamily: 'Rajdhani' }}>
+                  TRACE<span className="text-[#00F0FF]">SHIELD</span>
+                </h1>
+                <div className="text-[9px] text-[#00F0FF] font-bold tracking-[3px] mono-text opacity-70">X.FORENSICS</div>
+              </div>
+            )}
+          </div>
 
-        <nav className="flex-1 p-3 space-y-1 overflow-y-auto mt-4">
-          <NavItem icon="ph-house" label="Home" active={view === 'home'} onClick={() => setView('home')} collapsed={sidebarCollapsed} />
-          <NavItem icon="ph-squares-four" label="Dashboard" active={view === 'dashboard'} onClick={() => setView('dashboard')} collapsed={sidebarCollapsed} />
-          <NavItem icon="ph-chart-bar" label="Analytics" collapsed={sidebarCollapsed} />
-          <NavItem icon="ph-shield-warning" label="Threat Hunt" collapsed={sidebarCollapsed} />
-          <NavItem icon="ph-terminal-window" label="Data Logs" collapsed={sidebarCollapsed} />
-          <NavItem icon="ph-gear-six" label="Settings" collapsed={sidebarCollapsed} />
-        </nav>
+          <nav className="flex-1 p-3 space-y-1 overflow-y-auto mt-4">
+            <NavItem icon="ph-squares-four" label="Dashboard" active={view === 'dashboard'} onClick={() => setView('dashboard')} collapsed={sidebarCollapsed} />
+            <NavItem icon="ph-chart-bar" label="Analytics" collapsed={sidebarCollapsed} />
+            <NavItem icon="ph-shield-warning" label="Threat Hunt" collapsed={sidebarCollapsed} />
+            <NavItem icon="ph-terminal-window" label="Data Logs" collapsed={sidebarCollapsed} />
+            <NavItem icon="ph-gear-six" label="Settings" collapsed={sidebarCollapsed} />
+          </nav>
 
-        <div className="p-3 border-t border-[#1E2D4A] bg-[#070B14]/30">
-           <StatusDot ok={status?.neo4j !== null} label="Neo4j" showLabel={!sidebarCollapsed} />
-           <StatusDot ok={status?.model_loaded} label="AI Model" showLabel={!sidebarCollapsed} />
-           
-           {!sidebarCollapsed && status?.dataset_rows != null && (
-             <div className="px-3 py-2 mt-2 bg-[#121A2F] border border-[#1E2D4A] rounded-md">
-                <div className="text-[10px] text-[#94A3B8] uppercase tracking-widest mono-text">Dataset Scope</div>
-                <div className="text-lg font-bold text-white mono-text">{status.dataset_rows.toLocaleString()} <span className="text-[10px] text-[#00F0FF]">RECORDS</span></div>
-             </div>
-           )}
+          <div className="p-3 border-t border-[#1E2D4A] bg-[#070B14]/30">
+            <StatusDot ok={status?.neo4j !== null} label="Neo4j" showLabel={!sidebarCollapsed} />
+            <StatusDot ok={status?.model_loaded} label="AI Model" showLabel={!sidebarCollapsed} />
+            
+            {!sidebarCollapsed && status?.dataset_rows != null && (
+              <div className="px-3 py-2 mt-2 bg-[#121A2F] border border-[#1E2D4A] rounded-md">
+                  <div className="text-[10px] text-[#94A3B8] uppercase tracking-widest mono-text">Dataset Scope</div>
+                  <div className="text-lg font-bold text-white mono-text">{status.dataset_rows.toLocaleString()} <span className="text-[10px] text-[#00F0FF]">RECORDS</span></div>
+              </div>
+            )}
 
-           <button 
-             onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-             className="w-full mt-4 h-10 flex items-center justify-center text-[#94A3B8] hover:text-[#00F0FF] transition-colors border border-dashed border-[#1E2D4A] rounded-md"
-           >
-             <i className={`ph ${sidebarCollapsed ? 'ph-caret-double-right' : 'ph-caret-double-left'} text-lg`} />
-           </button>
-        </div>
-      </aside>
+            <button 
+              onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+              className="w-full mt-4 h-10 flex items-center justify-center text-[#94A3B8] hover:text-[#00F0FF] transition-colors border border-dashed border-[#1E2D4A] rounded-md"
+            >
+              <i className={`ph ${sidebarCollapsed ? 'ph-caret-double-right' : 'ph-caret-double-left'} text-lg`} />
+            </button>
+          </div>
+        </aside>
+      )}
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col relative z-20 min-w-0">
-        {/* Topbar */}
-        <header className="h-[70px] border-b border-[#1E2D4A] backdrop-blur-[10px] flex items-center justify-between px-6 sticky top-0 bg-[#070B14]/80 z-40">
-          <div className="flex flex-col">
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] font-bold text-[#00F0FF] mono-text tracking-widest uppercase bg-[#00F0FF]/10 px-2 py-0.5 rounded">Core_System</span>
-              <span className="text-[#1E2D4A] text-xs">/</span>
-               <span className="text-[10px] font-bold text-[#94A3B8] mono-text tracking-widest uppercase">{view === 'home' ? 'System_Manual' : 'Forensic_Output'}</span>
+        {/* Topbar - Hide on Landing Page */}
+        {view !== 'home' && (
+          <header className="h-[70px] border-b border-[#1E2D4A] backdrop-blur-[10px] flex items-center justify-between px-6 sticky top-0 bg-[#070B14]/80 z-40">
+            <div className="flex flex-col">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-bold text-[#00F0FF] mono-text tracking-widest uppercase bg-[#00F0FF]/10 px-2 py-0.5 rounded">Core_System</span>
+                <span className="text-[#1E2D4A] text-xs">/</span>
+                <span className="text-[10px] font-bold text-[#94A3B8] mono-text tracking-widest uppercase">{view === 'home' ? 'System_Manual' : 'Forensic_Output'}</span>
+              </div>
+              <div className="flex items-center gap-2 mt-0.5">
+                <span className="w-1.5 h-1.5 bg-[#39FF14] rounded-full animate-pulse shadow-[0_0_5px_#39FF14]" />
+                <span className="text-[11px] text-[#E2E8F0] font-bold tracking-widest uppercase font-['Rajdhani']">Real-time monitoring active</span>
+              </div>
             </div>
-            <div className="flex items-center gap-2 mt-0.5">
-               <span className="w-1.5 h-1.5 bg-[#39FF14] rounded-full animate-pulse shadow-[0_0_5px_#39FF14]" />
-               <span className="text-[11px] text-[#E2E8F0] font-bold tracking-widest uppercase font-['Rajdhani']">Real-time monitoring active</span>
-            </div>
-          </div>
 
-          <div className="flex items-center gap-6">
-             <div className="hidden md:flex flex-col items-end">
-                <span className="text-[10px] text-[#94A3B8] mono-text uppercase">Network Latency</span>
-                <span className="text-sm font-bold text-[#39FF14] mono-text">12.4ms <i className="ph ph-chart-line-up" /></span>
-             </div>
-             <div className="h-10 w-[1px] bg-[#1E2D4A]" />
-             <div className="flex items-center gap-3 cursor-pointer group">
-                <div className="text-right hidden sm:block">
-                   <div className="text-sm font-bold text-white group-hover:text-[#00F0FF] transition-colors font-['Rajdhani']">OPERATOR_01</div>
-                   <div className="text-[9px] text-[#00F0FF] mono-text">SEC_LVL_04</div>
-                </div>
-                <div className="w-10 h-10 rounded bg-[#1E2D4A] flex items-center justify-center border border-[#1E2D4A] group-hover:border-[#00F0FF] transition-all overflow-hidden relative">
-                   <i className="ph ph-user-focus text-2xl text-[#94A3B8]" />
-                   <div className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-[#39FF14] border-2 border-[#0D1323] rounded-full" />
-                </div>
-             </div>
-          </div>
-        </header>
+            <div className="flex items-center gap-6">
+              <div className="hidden md:flex flex-col items-end">
+                  <span className="text-[10px] text-[#94A3B8] mono-text uppercase">Network Latency</span>
+                  <span className="text-sm font-bold text-[#39FF14] mono-text">12.4ms <i className="ph ph-chart-line-up" /></span>
+              </div>
+              <div className="h-10 w-[1px] bg-[#1E2D4A]" />
+              <div className="flex items-center gap-3 cursor-pointer group">
+                  <div className="text-right hidden sm:block">
+                    <div className="text-sm font-bold text-white group-hover:text-[#00F0FF] transition-colors font-['Rajdhani']">OPERATOR_01</div>
+                    <div className="text-[9px] text-[#00F0FF] mono-text">SEC_LVL_04</div>
+                  </div>
+                  <div className="w-10 h-10 rounded bg-[#1E2D4A] flex items-center justify-center border border-[#1E2D4A] group-hover:border-[#00F0FF] transition-all overflow-hidden relative">
+                    <i className="ph ph-user-focus text-2xl text-[#94A3B8]" />
+                    <div className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-[#39FF14] border-2 border-[#0D1323] rounded-full" />
+                  </div>
+              </div>
+            </div>
+          </header>
+        )}
 
         {/* Scrollable Content */}
-        <div className="flex-1 overflow-y-auto p-4 md:p-8 relative">
-          <div className="max-w-[1400px] mx-auto space-y-8">
+        <div className={`flex-1 overflow-y-auto relative ${view === 'home' ? 'p-0' : 'p-4 md:p-8'}`}>
+          <div className={`${view === 'home' ? 'max-w-none' : 'max-w-[1400px] mx-auto space-y-8'}`}>
             
             {view === 'home' ? (
-              <HomePage />
+              <HomePage onStart={() => setView('dashboard')} />
             ) : (
               <>
                 {/* Page Header */}
