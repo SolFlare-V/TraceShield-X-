@@ -4,6 +4,7 @@ import RiskCard from './components/RiskCard'
 import AlertFeed from './components/AlertFeed'
 import GraphPanel from './components/GraphPanel'
 import LiveFeed from './components/LiveFeed'
+import ThreatStatePanel from './components/ThreatStatePanel'
 import HomePage from './components/HomePage'
 import AnalyticsPage from './components/AnalyticsPage'
 import DataLogsPage from './components/DataLogsPage'
@@ -27,15 +28,33 @@ function StatusDot({ ok, label, showLabel = true }) {
   )
 }
 
+const MAX_EVENTS = 100
+
+// Deduplicate events by ip+timestamp key
+function mergeEvents(existing, incoming) {
+  const keys = new Set(existing.map(e => `${e.ip}-${e.timestamp}`))
+  const fresh = incoming.filter(e => !keys.has(`${e.ip}-${e.timestamp}`))
+  return [...fresh, ...existing].slice(0, MAX_EVENTS)
+}
+
 export default function App() {
-  const [view, setView]       = useState('home')
-  const [status, setStatus]   = useState(null)
-  const [result, setResult]   = useState(null)
-  const [graph, setGraph]     = useState({ nodes: [], edges: [] })
-  const [loading, setLoading] = useState(false)
-  const [error, setError]     = useState(null)
+  const [view, setView]             = useState('home')
+  const [status, setStatus]         = useState(null)
+  const [result, setResult]         = useState(null)
+  const [graph, setGraph]           = useState({ nodes: [], edges: [] })
+  const [loading, setLoading]       = useState(false)
+  const [error, setError]           = useState(null)
   const [autoRefresh, setAutoRefresh] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  // Shared event state — persists across page navigation
+  const [liveEvents, setLiveEvents] = useState([])
+
+  // Fetch recent events on mount so history is available immediately
+  useEffect(() => {
+    ingest.get('/events/recent?limit=100')
+      .then(r => setLiveEvents(r.data.events || []))
+      .catch(() => {})
+  }, [])
 
   useEffect(() => {
     api.get('/api/status')
@@ -302,8 +321,11 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Live Event Stream — always visible, themed to match dashboard */}
-                <LiveFeed />
+                {/* Live Event Stream — always visible */}
+                <LiveFeed events={liveEvents} onEvents={setLiveEvents} />
+
+                {/* Active Threat State — blocked / honeypot / flagged IPs */}
+                <ThreatStatePanel />
               </>
             )}
 

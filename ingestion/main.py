@@ -120,6 +120,7 @@ async def ingest(payload: IngestPayload) -> IngestResponse:
             "timestamp":    ts.isoformat(),
         }
         await _ws_manager.broadcast(ws_payload)
+        _store_event(ws_payload)
         return response_obj
     except Exception as exc:
         logger.error("Ingest error: %s", exc)
@@ -127,7 +128,16 @@ async def ingest(payload: IngestPayload) -> IngestResponse:
 
 
 import json
+from collections import deque
 from typing import List as WsList
+
+# ── In-memory event store (persists across requests, max 100 events) ──────────
+_event_store: deque = deque(maxlen=100)
+
+
+def _store_event(payload: dict) -> None:
+    """Append event to store, newest first."""
+    _event_store.appendleft(payload)
 
 # ── WebSocket connection manager ──────────────────────────────────────────────
 
@@ -166,6 +176,13 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         _ws_manager.disconnect(websocket)
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/events/recent")
+def events_recent(limit: int = 50):
+    """Return the most recent processed events (max 100)."""
+    limit = min(max(limit, 1), 100)
+    return {"events": list(_event_store)[:limit]}
 
 
 # ── Log ingestion endpoints ───────────────────────────────────────────────────
@@ -232,6 +249,22 @@ async def dataset_logs(body: DatasetLogsRequest):
         anomaly_count = 0
 
         for ip, features in by_ip.items():
+            # Skip "unknown" IPs from process_event — they have no real IP to track
+            # and would inflate scores for unattributed log lines.
+            # Still include them in results with a low-weight standalone score.
+            if features.get("is_unknown") or ip == "unknown":
+                log_score = build_reason(features)
+                results.append({
+                    "ip":         "unknown",
+                    "risk_score": 0.0,
+                    "status":     "NORMAL",
+                    "actions":    [],
+                    "reason":     f"unattributed lines — {log_score}",
+                    "features":   features,
+                    "components": {},
+                })
+                continue
+
             # Step 2: seed per-IP log state so risk_engine picks up log signals
             ingest_logs_for_ip(ip, [
                 ev["raw"] for ev in events if ev.get("ip") == ip
@@ -268,9 +301,9 @@ async def dataset_logs(body: DatasetLogsRequest):
                 "usernames":     features.get("usernames", []),
                 "log_signals":   build_reason(features),
             }
-            # Broadcast immediately, then yield to event loop so the WS message
-            # is flushed to clients before processing the next IP (live stream effect)
+            # Broadcast immediately — yield to event loop so WS flushes before next IP
             await _ws_manager.broadcast(ws_payload)
+            _store_event(ws_payload)
             await asyncio.sleep(0.075)  # 75ms pacing between events
 
             results.append({
@@ -335,6 +368,19 @@ async def dataset_upload(file: UploadFile = File(...)):
         anomaly_count = 0
 
         for ip, features in by_ip.items():
+            # Skip unknown IPs — no real IP to track, don't inflate scores
+            if features.get("is_unknown") or ip == "unknown":
+                results.append({
+                    "ip":         "unknown",
+                    "risk_score": 0.0,
+                    "status":     "NORMAL",
+                    "actions":    [],
+                    "reason":     f"unattributed lines — {build_reason(features)}",
+                    "features":   features,
+                    "components": {},
+                })
+                continue
+
             ingest_logs_for_ip(ip, [ev["raw"] for ev in events if ev.get("ip") == ip])
 
             ts = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -367,6 +413,7 @@ async def dataset_upload(file: UploadFile = File(...)):
                 "log_signals": build_reason(features),
             }
             await _ws_manager.broadcast(ws_payload)
+            _store_event(ws_payload)
             await asyncio.sleep(0.075)
 
             results.append({

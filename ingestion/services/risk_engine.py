@@ -30,12 +30,12 @@ from ingestion.services.log_parser import compute_log_score
 
 logger = logging.getLogger(__name__)
 
-W_ML       = 0.30
-W_TEMPORAL = 0.20
+W_ML       = 0.20   # reduced — ML alone shouldn't dominate
+W_TEMPORAL = 0.15
 W_COUNT    = 0.20
 W_SPIKE    = 0.15
 W_TREND    = 0.10
-W_LOG      = 0.15   # Linux log signal weight
+W_LOG      = 0.20   # increased — log signals are the most reliable for real datasets
 
 SPIKE_OVERRIDE_THRESHOLD = 70.0
 _WINDOW_SECONDS = 60
@@ -86,26 +86,26 @@ def _spike_score(avg_count: float, request_count: int) -> tuple:
 
 def _classify(score: float) -> str:
     """
-    Single authoritative classification derived purely from score.
-    Thresholds calibrated to actual score distribution.
-    Score ranges:
-        0–25   → NORMAL
-        25–40  → SUSPICIOUS
-        40–60  → HIGH_RISK
+    Classification thresholds tuned for dataset-derived signals.
+    Lower thresholds ensure real attacks are not under-classified.
+
+        0–20   → NORMAL
+        20–35  → SUSPICIOUS
+        35–60  → HIGH_RISK
         60–100 → EXTREME_RISK
     """
     if score >= 60.0: return "EXTREME_RISK"
-    if score >= 40.0: return "HIGH_RISK"
-    if score >= 25.0: return "SUSPICIOUS"
+    if score >= 35.0: return "HIGH_RISK"
+    if score >= 20.0: return "SUSPICIOUS"
     return "NORMAL"
 
 
 def _validate_consistency(score: float, status: str) -> None:
     """Assert score falls within the expected range for its status."""
     ranges = {
-        "NORMAL":       (0.0,  25.0),
-        "SUSPICIOUS":   (25.0, 40.0),
-        "HIGH_RISK":    (40.0, 60.0),
+        "NORMAL":       (0.0,  20.0),
+        "SUSPICIOUS":   (20.0, 35.0),
+        "HIGH_RISK":    (35.0, 60.0),
         "EXTREME_RISK": (60.0, 100.0),
     }
     lo, hi = ranges[status]
@@ -159,6 +159,87 @@ def compute_risk(ip: str, request_count: int, timestamp: datetime) -> dict:
 
     override_triggered = False
 
+    # ── Log-signal floor overrides ────────────────────────────────────────────
+    # Applied BEFORE spike overrides. Score is set first, status follows.
+    log_details = log_data
+
+    failed   = log_details.get("failed_logins", 0)
+    sudo     = log_details.get("sudo_attempts", 0)
+    susp_cmd = log_details.get("suspicious_commands", 0)
+    sens     = log_details.get("sensitive_file_accesses", 0)
+
+    # ── Tier 1: EXTREME_RISK floors (score ≥ 70) ─────────────────────────────
+
+    # Privilege escalation: /etc/shadow + sudo → EXTREME (score 70)
+    if sens >= 1 and sudo >= 1:
+        if final < 70.0:
+            final = 70.0
+            override_triggered = True
+            logger.warning(
+                "LOG OVERRIDE [EXTREME/70] | ip=%s priv_esc: shadow+sudo", ip)
+
+    # Multi-stage attack: failed + suspicious + sudo all present → EXTREME
+    if failed >= 1 and susp_cmd >= 1 and sudo >= 1:
+        if final < 70.0:
+            final = 70.0
+            override_triggered = True
+            logger.warning(
+                "LOG OVERRIDE [EXTREME/70] | ip=%s multi-stage: failed=%d susp=%d sudo=%d",
+                ip, failed, susp_cmd, sudo)
+
+    # Reverse shell / multiple malicious commands → EXTREME
+    if susp_cmd >= 2:
+        if final < 70.0:
+            final = 70.0
+            override_triggered = True
+            logger.warning(
+                "LOG OVERRIDE [EXTREME/70] | ip=%s suspicious_cmds=%d", ip, susp_cmd)
+
+    # Brute force extreme: 8+ failed logins → EXTREME
+    if failed >= 8:
+        if final < 70.0:
+            final = 70.0
+            override_triggered = True
+            logger.warning(
+                "LOG OVERRIDE [EXTREME/70] | ip=%s failed_logins=%d", ip, failed)
+
+    # ── Tier 2: HIGH_RISK floors (score ≥ 35) ────────────────────────────────
+
+    # Single suspicious command (nc, wget, bash, chmod 777) → HIGH
+    if susp_cmd >= 1 and final < 35.0:
+        final = 35.0
+        override_triggered = True
+        logger.warning(
+            "LOG OVERRIDE [HIGH/35] | ip=%s suspicious_cmds=%d", ip, susp_cmd)
+
+    # Sensitive file access alone (/etc/shadow, /etc/passwd) → HIGH
+    if sens >= 1 and final < 35.0:
+        final = 35.0
+        override_triggered = True
+        logger.warning(
+            "LOG OVERRIDE [HIGH/35] | ip=%s sensitive_files=%d", ip, sens)
+
+    # 5+ failed logins → HIGH
+    if failed >= 5 and final < 35.0:
+        final = 35.0
+        override_triggered = True
+        logger.warning(
+            "LOG OVERRIDE [HIGH/35] | ip=%s failed_logins=%d", ip, failed)
+
+    # ── Tier 3: SUSPICIOUS floors (score ≥ 20) ───────────────────────────────
+
+    # 3+ failed logins → SUSPICIOUS
+    if failed >= 3 and final < 20.0:
+        final = 20.0
+        override_triggered = True
+        logger.warning(
+            "LOG OVERRIDE [SUSPICIOUS/20] | ip=%s failed_logins=%d", ip, failed)
+
+    # Any sudo attempt → SUSPICIOUS
+    if sudo >= 1 and final < 20.0:
+        final = 20.0
+        override_triggered = True
+
     # Spike override: extreme spike (>90) → score must be in EXTREME_RISK range
     if spike >= 90.0 and final < 60.0:
         final = max(final, 60.0)
@@ -177,8 +258,8 @@ def compute_risk(ip: str, request_count: int, timestamp: datetime) -> dict:
         )
 
     # ML override: anomalous ML must be at least SUSPICIOUS
-    if ml_score >= ML_ANOMALY_THRESHOLD and final < 30.0:
-        final = 30.0
+    if ml_score >= ML_ANOMALY_THRESHOLD and final < 20.0:
+        final = 20.0
         override_triggered = True
 
     # Clamp and classify — status derived ONLY from final score

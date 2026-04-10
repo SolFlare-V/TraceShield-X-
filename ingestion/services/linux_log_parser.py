@@ -315,10 +315,12 @@ def aggregate_by_ip(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
             a["last_seen"] = ts
 
     # Convert sets to sorted lists for JSON serialisation
+    # Mark unknown bucket so callers can handle it separately
     result = {}
     for ip, data in agg.items():
         d = dict(data)
         d["usernames"] = sorted(d["usernames"])
+        d["is_unknown"] = (ip == "unknown")
         result[ip] = d
 
     return result
@@ -329,25 +331,22 @@ def aggregate_by_ip(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
 def compute_request_count(features: Dict[str, Any]) -> int:
     """
     Derive a meaningful request_count from log features.
-    This is passed to process_event() so the risk engine sees realistic load.
+    Weights reflect real attack intensity — brute force and port scans
+    generate far more requests than a single sudo attempt.
 
-    Formula reflects attack intensity:
-      failed_logins × 5  (brute force = many requests)
-      sudo_attempts × 3
-      suspicious_commands × 4
-      port_scans × 10    (scanners generate many packets)
-      privilege_escalations × 6
-      total_events × 1   (baseline)
+    Capped at 500 to avoid overwhelming the temporal scorer.
     """
     raw = (
-        features.get("failed_logins",           0) * 5  +
-        features.get("sudo_attempts",           0) * 3  +
-        features.get("suspicious_commands",     0) * 4  +
-        features.get("port_scans",              0) * 10 +
-        features.get("privilege_escalations",   0) * 6  +
+        features.get("failed_logins",           0) * 8  +  # brute force = many requests
+        features.get("sudo_attempts",           0) * 4  +
+        features.get("suspicious_commands",     0) * 6  +
+        features.get("port_scans",              0) * 15 +  # scanners = very high volume
+        features.get("privilege_escalations",   0) * 8  +
+        features.get("sensitive_file_accesses", 0) * 5  +
+        features.get("log_cleared",             0) * 10 +  # covering tracks = extreme
         features.get("total_events",            0) * 1
     )
-    return max(raw, 1)
+    return min(max(raw, 1), 500)
 
 
 # ── Log score from aggregated features (used standalone if needed) ────────────

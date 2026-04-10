@@ -7,7 +7,7 @@ const STATUS_COLORS = {
   NORMAL:       { bg: 'bg-[#0D1323]/60',  text: 'text-[#39FF14]',  border: 'border-[#1E2D4A]',     dot: 'bg-[#39FF14]' },
 }
 
-const MAX_EVENTS = 50
+const MAX_EVENTS = 100
 
 function ActionBadge({ action }) {
   if (action === 'blocked')
@@ -19,10 +19,23 @@ function ActionBadge({ action }) {
   return null
 }
 
-export default function LiveFeed() {
-  const [events, setEvents]     = useState([])
-  const [wsStatus, setWsStatus] = useState('disconnected')
+/**
+ * LiveFeed — real-time event stream panel.
+ *
+ * Props:
+ *   events   — shared event array from App (persists across navigation)
+ *   onEvents — setter for shared event array
+ *
+ * Falls back to local state if props not provided.
+ */
+export default function LiveFeed({ events: externalEvents, onEvents }) {
+  const [localEvents, setLocalEvents] = useState([])
+  const [wsStatus, setWsStatus]       = useState('disconnected')
   const wsRef = useRef(null)
+
+  // Use external (App-level) state if provided, else local
+  const events    = externalEvents ?? localEvents
+  const setEvents = onEvents       ?? setLocalEvents
 
   useEffect(() => {
     let reconnectTimer = null
@@ -32,14 +45,14 @@ export default function LiveFeed() {
         const ws = new WebSocket('ws://127.0.0.1:8001/ws')
         wsRef.current = ws
 
-        ws.onopen  = () => setWsStatus('connected')
+        ws.onopen = () => setWsStatus('connected')
 
         ws.onmessage = (e) => {
           try {
             const event = JSON.parse(e.data)
             setEvents(prev => {
-              const key = `${event.timestamp}-${event.ip}`
-              if (prev.some(p => `${p.timestamp}-${p.ip}` === key)) return prev
+              const key = `${event.ip}-${event.timestamp}`
+              if (prev.some(p => `${p.ip}-${p.timestamp}` === key)) return prev
               return [event, ...prev].slice(0, MAX_EVENTS)
             })
           } catch { /* ignore malformed */ }
@@ -65,7 +78,7 @@ export default function LiveFeed() {
       clearTimeout(reconnectTimer)
       if (wsRef.current) wsRef.current.close()
     }
-  }, [])
+  }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
   const wsIndicator = {
     connected:    { color: 'text-[#39FF14]', dot: 'bg-[#39FF14]', pulse: true,  label: 'Live: Connected' },
@@ -82,6 +95,9 @@ export default function LiveFeed() {
           <span className="text-[11px] font-bold text-[#94A3B8] uppercase tracking-widest mono-text">
             Live Event Stream
           </span>
+          {events.length > 0 && (
+            <span className="text-[9px] text-[#94A3B8] mono-text">({events.length})</span>
+          )}
         </div>
         <span className={`flex items-center gap-1.5 text-[11px] mono-text font-bold ${wsIndicator.color}`}>
           <span className={`w-2 h-2 rounded-full ${wsIndicator.dot} ${wsIndicator.pulse ? 'animate-pulse' : ''}`} />
@@ -99,7 +115,7 @@ export default function LiveFeed() {
       ) : (
         <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
           {events.map((ev, i) => {
-            const c = STATUS_COLORS[ev.status] || STATUS_COLORS.NORMAL
+            const c       = STATUS_COLORS[ev.status] || STATUS_COLORS.NORMAL
             const actions = ev?.actions || []
             return (
               <div key={i}

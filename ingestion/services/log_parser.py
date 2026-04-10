@@ -145,32 +145,27 @@ def parse_log_lines(lines: List[str]) -> List[Dict[str, Any]]:
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
 
-_MAX_RAW_LOG_SCORE = 200.0   # theoretical max for normalization
+_MAX_RAW_LOG_SCORE = 100.0   # lower denominator = higher sensitivity per signal
 
 
 def compute_log_score(ip: str) -> Dict[str, Any]:
     """
     Compute normalized log_score (0–100) for an IP from its aggregated history.
 
-    Formula:
-        raw = failed_logins*10 + sudo_attempts*20 +
-              suspicious_commands*25 + sensitive_file_accesses*15
-        log_score = min(raw / MAX_RAW * 100, 100)
-
-    Args:
-        ip: Source IP address.
-
-    Returns:
-        Dict with log_score and contributing counts.
+    Weights calibrated so real attacks score correctly:
+        failed_logins           × 18  — 3 failures → ~54 raw → SUSPICIOUS
+        sudo_attempts           × 28  — 1 sudo → 28 raw → SUSPICIOUS
+        suspicious_commands     × 40  — 1 command → 40 raw → HIGH_RISK
+        sensitive_file_accesses × 35  — 1 access → 35 raw → HIGH_RISK
     """
     state = _ip_log_state[ip]
     s     = state.summary()
 
     raw = (
-        s["failed_logins"]           * 10 +
-        s["sudo_attempts"]           * 20 +
-        s["suspicious_commands"]     * 25 +
-        s["sensitive_file_accesses"] * 15
+        s["failed_logins"]           * 18 +
+        s["sudo_attempts"]           * 28 +
+        s["suspicious_commands"]     * 40 +
+        s["sensitive_file_accesses"] * 35
     )
 
     score = round(min(raw / _MAX_RAW_LOG_SCORE * 100.0, 100.0), 2)
