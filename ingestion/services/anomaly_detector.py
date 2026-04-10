@@ -43,14 +43,14 @@ def process_event(ip: str, device: str, request_count: int,
     status = result["status"]
     comps  = result["components"]
 
-    # Automated response
-    response = execute_response(ip, status, comps)
+    # Automated response — status is the single source of truth
+    response = execute_response(ip, score, status, comps)
 
     _log_result(ip, device, score, status, comps, response)
 
     # Persist non-normal events
     graph_stored = False
-    if status in ("SUSPICIOUS", "HIGH_RISK"):
+    if status in ("SUSPICIOUS", "HIGH_RISK", "EXTREME_RISK"):
         graph_stored = store_suspicious_activity(
             ip=ip, device=device,
             request_count=request_count,
@@ -120,6 +120,6 @@ def _build_message(ip, device, count, score, status, comps, response) -> str:
         action_str = f" IP flagged (count={response['flag_count']})."
 
     prefix = {"HIGH_RISK": "HIGH RISK", "SUSPICIOUS": "SUSPICIOUS",
-              "NORMAL": "NORMAL"}[status]
+              "NORMAL": "NORMAL", "EXTREME_RISK": "EXTREME RISK"}.get(status, status)
     return (f"{prefix}: {count} reqs from {ip} via {device}. "
             f"Score: {score:.1f}/100. {'; '.join(reasons)}.{action_str}")

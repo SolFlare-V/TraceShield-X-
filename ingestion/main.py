@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from ingestion.models.schemas import IngestPayload, IngestResponse
 from ingestion.services.anomaly_detector import process_event
 from ingestion.services.ml_model import get_ml_score
-from ingestion.services.response_engine import _blocked_ips, _honeypot_ips, _flagged_ips
+from ingestion.services.response_engine import get_full_state
 from ingestion.db.neo4j_conn import close_driver
 
 logging.basicConfig(
@@ -98,9 +98,5 @@ def health():
 
 @app.get("/blocked")
 def blocked_list():
-    """Return current in-memory blocked/flagged/honeypot state."""
-    return {
-        "blocked_ips":   list(_blocked_ips),
-        "honeypot_ips":  list(_honeypot_ips),
-        "flagged_ips":   dict(_flagged_ips),
-    }
+    """Return full in-memory response state with timestamps and reasons."""
+    return get_full_state()
