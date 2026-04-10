@@ -58,39 +58,48 @@ export default function AlertFeed({ flags = [], rawFlags = [], breakdown = {}, t
         )}
       </section>
 
-      {/* Attack Timeline / Terminal Output */}
-      {timeline.length > 0 && (
-        <section className="flex-1 flex flex-col">
+      {/* Suspicious Event Timeline */}
+      <section className="flex-1 flex flex-col">
           <div className="flex items-center gap-2 mb-4">
-             <i className="ph ph-clock-counter-clockwise text-[#00F0FF]" />
-             <p className="text-[#94A3B8] text-[10px] uppercase tracking-widest font-bold font-['Rajdhani']">Incident Chronology</p>
+            <i className="ph ph-clock-counter-clockwise text-[#FFEA00]" />
+            <p className="text-[#94A3B8] text-[10px] uppercase tracking-widest font-bold font-['Rajdhani']">Suspicious Event Timeline</p>
+            <span className="text-[9px] text-[#94A3B8] mono-text ml-1">{timeline.length} events</span>
           </div>
-          <div className="bg-[#05080F] border border-[#111A2E] rounded p-4 font-['JetBrains_Mono'] text-[12px] flex-1 overflow-y-auto max-h-[250px] relative scrollbar-custom">
-             <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-[#00F0FF]/20 to-transparent" />
-             <div className="space-y-3">
-                {timeline.map((event, i) => (
-                  <div key={i} className="flex gap-4 group">
-                    <span className="text-[#64748B] opacity-50 flex-shrink-0">[{timestamp}]</span>
-                    <div className="flex-1">
-                       <span className={`font-bold mr-2 ${i === 0 ? 'text-[#FF003C]' : 'text-[#00F0FF]'}`}>
-                          {i === 0 ? 'CRIT' : 'INFO'}
-                       </span>
-                       <span className={`${i === 0 ? 'text-[#E2E8F0]' : 'text-[#94A3B8]'} group-hover:text-white transition-colors`}>
-                          {event}
-                       </span>
+          <div className="bg-[#070B14] border border-[#1E2D4A] rounded-lg overflow-hidden">
+            {/* Header */}
+            <div className="grid gap-2 px-4 py-2 border-b border-[#1E2D4A] bg-[#0D1323]"
+              style={{ gridTemplateColumns: '150px 110px 1fr' }}>
+              {['Timestamp', 'Log Source', 'Description & Evidence'].map(h => (
+                <span key={h} className="text-[9px] font-bold text-[#94A3B8] mono-text uppercase tracking-widest">{h}</span>
+              ))}
+            </div>
+            {/* Rows */}
+            <div className="divide-y divide-[#1E2D4A]/40">
+              {timeline.map((evt, i) => {
+                const isObj = typeof evt === 'object' && evt !== null;
+                return (
+                  <div key={i} className="grid gap-2 px-4 py-3 hover:bg-[#0D1323]/60 transition-colors"
+                    style={{ gridTemplateColumns: '150px 110px 1fr' }}>
+                    <span className="text-[10px] text-[#FFEA00] mono-text font-bold">
+                      {isObj ? evt.time : timestamp}
+                    </span>
+                    <span className="text-[10px] text-[#B026FF] mono-text font-bold">
+                      {isObj ? evt.source : 'syslog'}
+                    </span>
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[11px] text-white">
+                        {isObj ? evt.description : evt}
+                      </span>
+                      {isObj && evt.evidence && (
+                        <code className="text-[9px] text-[#94A3B8] mono-text break-all">{evt.evidence}</code>
+                      )}
                     </div>
                   </div>
-                ))}
-                <div className="flex items-center">
-                   <span className="text-[#64748B] opacity-50 mr-4">[{timestamp}]</span>
-                   <span className="text-[#00F0FF] font-bold mr-2">WAIT</span>
-                   <span className="text-[#94A3B8]">Awaiting next sequence...</span>
-                   <span className="terminal-cursor" />
-                </div>
-             </div>
+                );
+              })}
+            </div>
           </div>
         </section>
-      )}
 
       {/* Breakdown bars */}
       {Object.keys(breakdown).length > 0 && (
