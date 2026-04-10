@@ -4,6 +4,9 @@ import RiskCard from './components/RiskCard'
 import AlertFeed from './components/AlertFeed'
 import GraphPanel from './components/GraphPanel'
 import HomePage from './components/HomePage'
+import AnalyticsPage from './components/AnalyticsPage'
+import DataLogsPage from './components/DataLogsPage'
+import ThreatHuntPage from './components/ThreatHuntPage'
 
 const api = axios.create({ baseURL: 'http://localhost:8000' })
 
@@ -104,14 +107,13 @@ export default function App() {
         <nav className="flex-1 p-3 space-y-1 overflow-y-auto mt-4">
           <NavItem icon="ph-house" label="Home" active={view === 'home'} onClick={() => setView('home')} collapsed={sidebarCollapsed} />
           <NavItem icon="ph-squares-four" label="Dashboard" active={view === 'dashboard'} onClick={() => setView('dashboard')} collapsed={sidebarCollapsed} />
-          <NavItem icon="ph-chart-bar" label="Analytics" collapsed={sidebarCollapsed} />
-          <NavItem icon="ph-shield-warning" label="Threat Hunt" collapsed={sidebarCollapsed} />
-          <NavItem icon="ph-terminal-window" label="Data Logs" collapsed={sidebarCollapsed} />
-          <NavItem icon="ph-gear-six" label="Settings" collapsed={sidebarCollapsed} />
+          <NavItem icon="ph-chart-bar" label="Analytics" active={view === 'analytics'} onClick={() => setView('analytics')} collapsed={sidebarCollapsed} />
+          <NavItem icon="ph-shield-warning" label="Threat Hunt" active={view === 'threat'} onClick={() => setView('threat')} collapsed={sidebarCollapsed} />
+          <NavItem icon="ph-terminal-window" label="Data Logs" active={view === 'logs'} onClick={() => setView('logs')} collapsed={sidebarCollapsed} />
         </nav>
 
         <div className="p-3 border-t border-[#1E2D4A] bg-[#070B14]/30">
-           <StatusDot ok={status?.neo4j !== null} label="Neo4j" showLabel={!sidebarCollapsed} />
+           <StatusDot ok={status?.neo4j === true} label="Neo4j" showLabel={!sidebarCollapsed} />
            <StatusDot ok={status?.model_loaded} label="AI Model" showLabel={!sidebarCollapsed} />
            
            {!sidebarCollapsed && status?.dataset_rows != null && (
@@ -138,7 +140,9 @@ export default function App() {
             <div className="flex items-center gap-2">
               <span className="text-[10px] font-bold text-[#00F0FF] mono-text tracking-widest uppercase bg-[#00F0FF]/10 px-2 py-0.5 rounded">Core_System</span>
               <span className="text-[#1E2D4A] text-xs">/</span>
-               <span className="text-[10px] font-bold text-[#94A3B8] mono-text tracking-widest uppercase">{view === 'home' ? 'System_Manual' : 'Forensic_Output'}</span>
+               <span className="text-[10px] font-bold text-[#94A3B8] mono-text tracking-widest uppercase">
+                 {view === 'home' ? 'System_Manual' : view === 'analytics' ? 'Predictive_Data' : view === 'logs' ? 'Event_Viewer' : view === 'threat' ? 'Threat_Hunt' : 'Forensic_Output'}
+               </span>
             </div>
             <div className="flex items-center gap-2 mt-0.5">
                <span className="w-1.5 h-1.5 bg-[#39FF14] rounded-full animate-pulse shadow-[0_0_5px_#39FF14]" />
@@ -170,7 +174,13 @@ export default function App() {
           <div className="max-w-[1400px] mx-auto space-y-8">
             
             {view === 'home' ? (
-              <HomePage />
+              <HomePage onStart={() => setView('dashboard')} />
+            ) : view === 'analytics' ? (
+              <AnalyticsPage />
+            ) : view === 'logs' ? (
+              <DataLogsPage />
+            ) : view === 'threat' ? (
+              <ThreatHuntPage />
             ) : (
               <>
                 {/* Page Header */}
@@ -228,10 +238,6 @@ export default function App() {
                         breakdown={result.breakdown}
                         timeline={result.timeline || []}
                       />
-                    </div>
-                    <div className="col-span-12">
-                      <GraphPanel nodes={graph.nodes} edges={graph.edges}
-                        onCleared={() => setGraph({ nodes: [], edges: [] })} />
                     </div>
                   </div>
                 ) : (
