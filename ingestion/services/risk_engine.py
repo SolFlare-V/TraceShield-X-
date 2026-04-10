@@ -2,21 +2,22 @@
 risk_engine.py — Adaptive weighted risk scoring with 4-tier classification.
 
 Weights:
-    ML score       → 35%
-    Temporal score → 25%
+    ML score       → 30%
+    Temporal score → 20%
     Count score    → 20%
-    Spike score    → 10%
+    Spike score    → 15%
     Trend score    → 10%
+    Log score      → 15%  (NEW — Linux system log signals)
 
 Classification (single authoritative variable):
-    0–30   → NORMAL
-    30–70  → SUSPICIOUS
-    70–90  → HIGH_RISK
-    90–100 → EXTREME_RISK
+    0–25   → NORMAL
+    25–40  → SUSPICIOUS
+    40–60  → HIGH_RISK
+    60–100 → EXTREME_RISK
 
 Spike override:
-    spike > 70 → floor final at 70 (HIGH_RISK minimum)
-    Score can still exceed 90 naturally → EXTREME_RISK
+    spike > 70 → floor final at 40 (HIGH_RISK minimum)
+    spike >= 90 → floor final at 60 (EXTREME_RISK minimum)
 """
 
 import logging
@@ -25,14 +26,16 @@ from datetime import datetime
 
 from ingestion.services.ml_model  import get_ml_score, ML_ANOMALY_THRESHOLD
 from ingestion.services.ip_memory import record_event
+from ingestion.services.log_parser import compute_log_score
 
 logger = logging.getLogger(__name__)
 
-W_ML       = 0.35
-W_TEMPORAL = 0.25
+W_ML       = 0.30
+W_TEMPORAL = 0.20
 W_COUNT    = 0.20
-W_SPIKE    = 0.10
+W_SPIKE    = 0.15
 W_TREND    = 0.10
+W_LOG      = 0.15   # Linux log signal weight
 
 SPIKE_OVERRIDE_THRESHOLD = 70.0
 _WINDOW_SECONDS = 60
@@ -133,17 +136,26 @@ def compute_risk(ip: str, request_count: int, timestamp: datetime) -> dict:
 
     spike, spike_ratio = _spike_score(avg_count, request_count)
 
+    # Compute log score FIRST so it can feed into ML features
+    log_data  = compute_log_score(ip)
+    l_score   = log_data["log_score"]
+
     ml_score = get_ml_score(
         request_count, timestamp,
         deviation=spike_ratio,
         hist_rate=hist_rate,
+        failed_logins=log_data.get("failed_logins", 0),
+        sudo_attempts=log_data.get("sudo_attempts", 0),
+        suspicious_commands=log_data.get("suspicious_commands", 0),
+        sensitive_file_access=log_data.get("sensitive_file_accesses", 0),
     )
     t_score = _temporal_score(ip, request_count, timestamp)
     c_score = _count_score(request_count)
 
-    # Base weighted score
+    # Weighted sum including log signal
     final = (W_ML * ml_score + W_TEMPORAL * t_score +
-             W_COUNT * c_score + W_SPIKE * spike + W_TREND * t_score_val)
+             W_COUNT * c_score + W_SPIKE * spike +
+             W_TREND * t_score_val + W_LOG * l_score)
 
     override_triggered = False
 
@@ -177,15 +189,15 @@ def compute_risk(ip: str, request_count: int, timestamp: datetime) -> dict:
     _validate_consistency(final, status)
 
     logger.info(
-        "RISK | ip=%-16s count=%4d avg=%.1f spike=%.1f(%.2fx) trend=%.1f | "
+        "RISK | ip=%-16s count=%4d avg=%.1f spike=%.1f(%.2fx) trend=%.1f log=%.1f | "
         "ml=%.1f temporal=%.1f count=%.1f → FINAL=%.2f [%s] override=%s",
-        ip, request_count, avg_count, spike, spike_ratio, t_score_val,
+        ip, request_count, avg_count, spike, spike_ratio, t_score_val, l_score,
         ml_score, t_score, c_score, final, status, override_triggered
     )
 
     return {
-        "risk_score":        final,
-        "status":            status,
+        "risk_score":         final,
+        "status":             status,
         "override_triggered": override_triggered,
         "components": {
             "ml_score":       round(ml_score, 2),
@@ -193,7 +205,9 @@ def compute_risk(ip: str, request_count: int, timestamp: datetime) -> dict:
             "count_score":    round(c_score, 2),
             "spike_score":    spike,
             "trend_score":    t_score_val,
+            "log_score":      round(l_score, 2),
             "avg_previous":   round(avg_count, 2),
             "spike_ratio":    spike_ratio,
+            "log_details":    log_data,
         },
     }

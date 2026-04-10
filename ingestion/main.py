@@ -8,12 +8,22 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 
-from ingestion.models.schemas import IngestPayload, IngestResponse
+from ingestion.models.schemas import IngestPayload, IngestResponse, ResponseDetail
 from ingestion.services.anomaly_detector import process_event
-from ingestion.services.ml_model import get_ml_score
+from ingestion.services.ml_model import get_ml_score, load_model, reload_model, is_loaded
 from ingestion.services.response_engine import get_full_state
+from ingestion.services.log_parser import (
+    parse_log_lines,
+    ingest_logs_for_ip,
+    get_ip_log_summary,
+)
+from ingestion.services.ml_training import (
+    train as ml_train,
+    evaluate as ml_evaluate,
+)
 from ingestion.db.neo4j import (
     get_all_relationships,
     get_recent_attacks,
@@ -33,9 +43,15 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Ingestion service starting — warming up ML model...")
-    get_ml_score(50, datetime.now())
-    logger.info("ML model ready. Service online.")
+    logger.info("Ingestion service starting...")
+    loaded = load_model()
+    if loaded:
+        logger.info("ML model ready. Service online.")
+    else:
+        logger.warning(
+            "Service starting WITHOUT ML model. "
+            "Fallback scoring active. POST /ml/train to enable ML."
+        )
     yield
     close_driver()
     close_neo4j()
@@ -102,6 +118,88 @@ def ingest(payload: IngestPayload) -> IngestResponse:
 @app.get("/health")
 def health():
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
+
+# ── Log ingestion endpoints ───────────────────────────────────────────────────
+
+class LogIngestRequest(BaseModel):
+    ip: str
+    log_lines: list[str]
+
+
+@app.post("/ingest/logs")
+def ingest_logs(body: LogIngestRequest):
+    """
+    Ingest Linux system log lines for a specific IP.
+    Updates per-IP log state used in hybrid risk scoring.
+    """
+    result = ingest_logs_for_ip(body.ip, body.log_lines)
+    logger.info("LOG INGEST | ip=%s lines=%d log_score=%.2f",
+                body.ip, len(body.log_lines), result["log_score"])
+    return {
+        "ip":         body.ip,
+        "lines_parsed": len(body.log_lines),
+        **result,
+    }
+
+
+@app.get("/logs/{ip_address}")
+def get_log_summary(ip_address: str):
+    """Return aggregated log signals for a specific IP."""
+    return {"ip": ip_address, "log_summary": get_ip_log_summary(ip_address)}
+
+
+# ── ML training endpoints ─────────────────────────────────────────────────────
+
+@app.post("/ml/train")
+def ml_train_endpoint():
+    """
+    Train the Isolation Forest on 8 unified features and save to disk.
+    Reloads model into memory immediately after training.
+    """
+    try:
+        ml_train(csv_path=None, save=True)
+        success = reload_model()
+        if not success:
+            raise RuntimeError("Model saved but failed to reload from disk.")
+        return {
+            "status":       "trained",
+            "model_loaded": True,
+            "features":     8,
+            "feature_cols": ["request_count","requests_per_second","spike_score",
+                             "trend_score","failed_logins","sudo_attempts",
+                             "suspicious_commands","sensitive_file_access"],
+            "message":      "Model trained on 8 unified features, saved and reloaded.",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ml/status")
+def ml_status():
+    """Return current ML model load status."""
+    return {
+        "model_loaded": is_loaded(),
+        "feature_count": 8,
+        "feature_cols": ["request_count","requests_per_second","spike_score",
+                         "trend_score","failed_logins","sudo_attempts",
+                         "suspicious_commands","sensitive_file_access"],
+        "message": (
+            "Model loaded and ready for inference."
+            if is_loaded() else
+            "Model not loaded. POST /ml/train to train and load."
+        ),
+    }
+
+
+@app.get("/ml/evaluate")
+def ml_evaluate_endpoint():
+    """Evaluate the trained model and return anomaly metrics."""
+    try:
+        result = ml_evaluate(csv_path=None)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/blocked")

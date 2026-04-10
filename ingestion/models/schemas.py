@@ -2,7 +2,7 @@
 schemas.py — Pydantic models for the ingestion API.
 """
 
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 from pydantic import BaseModel, Field
 from datetime import datetime
 
@@ -31,5 +31,5 @@ class IngestResponse(BaseModel):
     request_count: int
     timestamp:    datetime
     graph_stored: bool
-    components:   Dict[str, float]
+    components:   Dict[str, Any]
     response:     ResponseDetail

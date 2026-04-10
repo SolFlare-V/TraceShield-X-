@@ -1,112 +1,155 @@
 """
-ml_model.py — Isolation Forest ML inference with adaptive features.
+ml_model.py — Thin inference wrapper for TraceShield ML pipeline.
 
-Features (8):
-    0  request_count          — raw volume
-    1  log1p_request_count    — log-scaled volume
-    2  hour_of_day            — temporal context
-    3  is_night               — off-hours flag
-    4  is_weekend             — weekend flag
-    5  requests_per_second    — rate proxy
-    6  burst_flag             — hard burst signal
-    7  deviation_from_avg     — behavioral deviation (new)
-    8  historical_rate        — historical RPS baseline (new)
+Delegates ALL feature engineering and inference to ml_training.py.
+Single source of truth: 8 unified features.
+
+Lifecycle:
+    Startup  → try loading saved model; if missing, log warning, set None
+    Inference → if model None, return fallback score (no crash)
+    Training → POST /ml/train trains + saves + reloads into memory
 """
 
 import logging
-import numpy as np
 from datetime import datetime
+from typing import Optional
+
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
+from ingestion.services.ml_training import (
+    FEATURE_COLS,
+    load_saved_model,
+    train,
+    predict,
+)
+
 logger = logging.getLogger(__name__)
 
-_model:  IsolationForest = None
-_scaler: StandardScaler  = None
+ML_ANOMALY_THRESHOLD = 60.0
 
-ML_ANOMALY_THRESHOLD = 60.0   # scores above this = anomalous
-
-
-def _build_features(request_count: int, hour: int, is_night: int,
-                    is_weekend: int, burst: int,
-                    deviation: float = 0.0,
-                    hist_rate: float = 0.0) -> np.ndarray:
-    return np.array([[
-        request_count,
-        np.log1p(request_count),
-        hour,
-        is_night,
-        is_weekend,
-        request_count / 60.0,
-        burst,
-        deviation,
-        hist_rate,
-    ]])
+_model:  Optional[IsolationForest] = None
+_scaler: Optional[StandardScaler]  = None
+_model_loaded: bool = False
 
 
-def _train() -> None:
-    global _model, _scaler
-    import random
-    random.seed(42)
-    np.random.seed(42)
-
-    rows = []
-
-    # 80% normal — low counts, business hours, low deviation
-    for _ in range(6400):
-        c   = int(np.clip(np.random.lognormal(3.5, 0.8), 1, 95))
-        h   = random.randint(8, 20)
-        dev = random.uniform(-0.2, 0.2)   # small deviation
-        hr  = random.uniform(0.1, 1.5)
-        rows.append(_build_features(c, h, 0,
-                                    int(random.randint(0,4) >= 5),
-                                    0, dev, hr)[0])
-
-    # 20% attack — high counts, off-hours, large deviation
-    for _ in range(1600):
-        c   = int(np.clip(np.random.lognormal(5.5, 1.0), 101, 5000))
-        h   = random.choice(list(range(0, 6)) + list(range(22, 24)))
-        dev = random.uniform(2.0, 10.0)   # large spike
-        hr  = random.uniform(5.0, 50.0)
-        rows.append(_build_features(c, h, 1,
-                                    random.randint(0, 1),
-                                    1, dev, hr)[0])
-
-    X = np.array(rows)
-    _scaler = StandardScaler()
-    X_scaled = _scaler.fit_transform(X)
-    _model = IsolationForest(n_estimators=300, contamination=0.20,
-                             max_features=0.85, random_state=42)
-    _model.fit(X_scaled)
-    logger.info("ML model trained on %d samples (9 features).", len(X))
-
-
-def get_ml_score(request_count: int, timestamp: datetime,
-                 deviation: float = 0.0,
-                 hist_rate: float = 0.0) -> float:
+def load_model() -> bool:
     """
-    Returns ML anomaly score normalized to 0-100.
-    Higher = more anomalous.
+    Try loading saved model from disk.
+    Does NOT train if missing — returns False instead.
 
-    Args:
-        request_count: Current request count.
-        timestamp:     Event timestamp.
-        deviation:     Normalized deviation from IP historical average.
-        hist_rate:     Historical requests-per-second baseline for this IP.
+    Returns:
+        True if model loaded successfully, False if not found.
     """
-    global _model, _scaler
-    if _model is None:
-        _train()
+    global _model, _scaler, _model_loaded
+    saved_model, saved_scaler = load_saved_model()
+    if saved_model is not None:
+        _model        = saved_model
+        _scaler       = saved_scaler
+        _model_loaded = True
+        logger.info(
+            "ML model loaded successfully (%d features: %s).",
+            len(FEATURE_COLS), FEATURE_COLS
+        )
+        return True
 
-    h          = timestamp.hour
-    is_night   = 1 if (h <= 6 or h >= 22) else 0
-    is_weekend = 1 if timestamp.weekday() >= 5 else 0
-    burst      = 1 if request_count > 200 else 0
+    logger.warning(
+        "No trained model found at ingestion/models/. "
+        "Run POST /ml/train to train and save the model."
+    )
+    _model_loaded = False
+    return False
 
-    x = _build_features(request_count, h, is_night, is_weekend,
-                        burst, deviation, hist_rate)
-    x_scaled = _scaler.transform(x)
 
-    raw   = _model.decision_function(x_scaled)[0]
-    score = (1 - (raw + 0.5)) * 100
-    return float(np.clip(score, 0.0, 100.0))
+def reload_model() -> bool:
+    """Force reload model from disk after training. Returns True on success."""
+    global _model, _scaler, _model_loaded
+    _model        = None
+    _scaler       = None
+    _model_loaded = False
+    return load_model()
+
+
+def is_loaded() -> bool:
+    return _model_loaded and _model is not None
+
+
+def _fallback_score(request_count: int, deviation: float,
+                    failed_logins: float, suspicious_commands: float) -> float:
+    """
+    Rule-based fallback score when ML model is not loaded.
+    Approximates anomaly likelihood from raw signals.
+    """
+    score = 0.0
+    if request_count > 300:   score += 35.0
+    elif request_count > 100: score += 20.0
+    elif request_count > 50:  score += 10.0
+    if deviation > 3.0:       score += 25.0
+    elif deviation > 1.0:     score += 10.0
+    if failed_logins > 5:     score += 20.0
+    if suspicious_commands > 0: score += 15.0
+    return min(score, 100.0)
+
+
+def get_ml_score(
+    request_count: int,
+    timestamp: datetime,
+    deviation: float = 0.0,
+    hist_rate: float = 0.0,
+    failed_logins: float = 0.0,
+    sudo_attempts: float = 0.0,
+    suspicious_commands: float = 0.0,
+    sensitive_file_access: float = 0.0,
+) -> float:
+    """
+    Return ML anomaly score (0–100). Uses trained model if loaded,
+    otherwise returns a rule-based fallback score.
+
+    Feature vector shape: (1, 8) — validated before inference.
+    """
+    if not is_loaded():
+        score = _fallback_score(request_count, deviation,
+                                failed_logins, suspicious_commands)
+        logger.warning(
+            "ML model not loaded — using fallback score=%.2f. "
+            "Run POST /ml/train to enable ML inference.", score
+        )
+        return score
+
+    rps = hist_rate if hist_rate > 0 else request_count / 60.0
+
+    feature_dict = {
+        "request_count":         float(request_count),
+        "requests_per_second":   float(rps),
+        "spike_score":           float(deviation * 100.0),
+        "trend_score":           0.0,
+        "failed_logins":         float(failed_logins),
+        "sudo_attempts":         float(sudo_attempts),
+        "suspicious_commands":   float(suspicious_commands),
+        "sensitive_file_access": float(sensitive_file_access),
+    }
+
+    # Validate feature count before inference
+    if len(feature_dict) != len(FEATURE_COLS):
+        logger.error(
+            "Feature mismatch: expected %d got %d — using fallback.",
+            len(FEATURE_COLS), len(feature_dict)
+        )
+        return _fallback_score(request_count, deviation,
+                               failed_logins, suspicious_commands)
+
+    result = predict(_model, _scaler, feature_dict)
+    score  = result["ml_score"]
+
+    logger.debug(
+        "ML inference | shape=(1,%d) score=%.2f anomaly=%s decision=%.4f",
+        len(FEATURE_COLS), score, result["anomaly"], result["decision_score"]
+    )
+
+    if result["anomaly"]:
+        logger.warning(
+            "ML anomaly detected: score=%.2f prediction=%d decision=%.4f",
+            score, result["prediction"], result["decision_score"]
+        )
+
+    return score

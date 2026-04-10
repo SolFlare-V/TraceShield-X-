@@ -75,6 +75,7 @@ def process_event(ip: str, device: str, request_count: int,
             trend_score=comps.get("trend_score", 0),
             temporal_score=comps.get("temporal_score", 0),
             count_score=comps.get("count_score", 0),
+            log_score=comps.get("log_score", 0),
         )
 
     # Store honeypot redirect if triggered

@@ -86,13 +86,15 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _build_reason(ml: float, spike: float, trend: float, temporal: float) -> str:
+def _build_reason(ml: float, spike: float, trend: float, temporal: float,
+                  log: float = 0.0) -> str:
     """Build non-empty explainable reason string from component scores."""
     parts = []
     if ml >= 60:       parts.append(f"ml={ml:.1f}")
     if spike >= 70:    parts.append(f"spike={spike:.1f}")
     if trend >= 60:    parts.append(f"trend={trend:.1f}")
     if temporal >= 50: parts.append(f"rate={temporal:.1f}")
+    if log >= 30:      parts.append(f"logs={log:.1f}")
     return "+".join(parts) if parts else "combined_score"
 
 
@@ -103,7 +105,7 @@ def store_attack_event(
     risk_score: float, status: str, timestamp: str,
     ml_score: float = 0.0, spike_score: float = 0.0,
     trend_score: float = 0.0, temporal_score: float = 0.0,
-    count_score: float = 0.0,
+    count_score: float = 0.0, log_score: float = 0.0,
 ) -> bool:
     """
     MERGE IP and Device nodes.
@@ -111,7 +113,8 @@ def store_attack_event(
     updates metadata if same event type recurs, preventing duplicates.
     """
     severity = SEVERITY_MAP.get(status, 0)
-    reason   = _build_reason(ml_score, spike_score, trend_score, temporal_score)
+    reason   = _build_reason(ml_score, spike_score, trend_score,
+                             temporal_score, log_score)
     ts       = timestamp or _now()
 
     query = (
@@ -136,6 +139,7 @@ def store_attack_event(
         "  r.trend_score    = $trend_score, "
         "  r.temporal_score = $temporal_score, "
         "  r.count_score    = $count_score, "
+        "  r.log_score      = $log_score, "
         "  r.hit_count      = 1 "
         "ON MATCH SET "
         "  r.timestamp      = $ts, "
@@ -147,6 +151,7 @@ def store_attack_event(
         "  r.trend_score    = $trend_score, "
         "  r.temporal_score = $temporal_score, "
         "  r.count_score    = $count_score, "
+        "  r.log_score      = $log_score, "
         "  r.hit_count      = coalesce(r.hit_count, 1) + 1"
     )
     _run(query,
@@ -155,7 +160,7 @@ def store_attack_event(
          severity=severity, reason=reason,
          ml_score=ml_score, spike_score=spike_score,
          trend_score=trend_score, temporal_score=temporal_score,
-         count_score=count_score)
+         count_score=count_score, log_score=log_score)
 
     logger.info(
         "Graph updated: IP(%s) → ATTACKED → Device(%s) [%s score=%.1f reason=%s]",
