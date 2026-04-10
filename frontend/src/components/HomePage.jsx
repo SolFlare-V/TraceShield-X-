@@ -1,6 +1,6 @@
 import React from 'react';
 
-export default function HomePage({ onStart }) {
+export default function HomePage() {
   return (
     <div className="animate-fadeIn space-y-12 pb-20">
       {/* Hero Section */}
@@ -23,23 +23,12 @@ export default function HomePage({ onStart }) {
               TraceShield X++ is an advanced security orchestration platform designed to bridge the gap between 
               raw system logs and actionable forensic intelligence using AI-driven anomaly detection and graph-based relationship mapping.
            </p>
-           
-           <div className="flex flex-wrap items-center gap-6">
-              <button 
-                onClick={onStart}
-                className="group relative px-8 py-4 bg-[#00F0FF] text-[#0D1323] font-bold font-['Rajdhani'] uppercase tracking-widest text-lg rounded overflow-hidden transition-all hover:pr-12 shadow-[0_0_20px_rgba(0,240,255,0.3)] hover:shadow-[0_0_30px_rgba(0,240,255,0.5)]"
-              >
-                <span className="relative z-10">Access Software</span>
-                <i className="ph ph-arrow-right absolute right-4 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-all" />
-              </button>
-
-              <div className="flex gap-4">
-                <div className="px-6 py-2 border border-[#00F0FF] text-[#00F0FF] font-['Rajdhani'] font-bold uppercase tracking-widest text-sm rounded bg-[#00F0FF]/5">
-                   System_Ready
-                </div>
-                <div className="px-6 py-2 border border-[#1E2D4A] text-[#94A3B8] font-['Rajdhani'] font-bold uppercase tracking-widest text-sm rounded">
-                   v4.2.0_Stable
-                </div>
+           <div className="flex flex-wrap gap-4">
+              <div className="px-6 py-2 border border-[#00F0FF] text-[#00F0FF] font-['Rajdhani'] font-bold uppercase tracking-widest text-sm rounded bg-[#00F0FF]/5">
+                 System_Ready
+              </div>
+              <div className="px-6 py-2 border border-[#1E2D4A] text-[#94A3B8] font-['Rajdhani'] font-bold uppercase tracking-widest text-sm rounded">
+                 v4.2.0_Stable
               </div>
            </div>
         </div>

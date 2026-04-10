@@ -93,7 +93,11 @@ def get_attack_graph() -> Dict[str, Any]:
     """
     try:
         results = run_query(
-            "MATCH (n)-[r]->(m) RETURN n, r, m LIMIT 100"
+            "MATCH (n)-[r]->(m) RETURN "
+            "labels(n) AS n_labels, properties(n) AS n_props, "
+            "type(r) AS r_type, "
+            "labels(m) AS m_labels, properties(m) AS m_props "
+            "LIMIT 100"
         )
 
         nodes_seen = set()
@@ -101,20 +105,22 @@ def get_attack_graph() -> Dict[str, Any]:
         edges: List[Dict[str, Any]] = []
 
         for record in results:
-            n = dict(record.get("n", {}))
-            m = dict(record.get("m", {}))
-            r = record.get("r")
+            n_props = record.get("n_props", {})
+            m_props = record.get("m_props", {})
+            r_type  = record.get("r_type", "UNKNOWN")
 
-            for node in (n, m):
-                node_id = node.get("name", str(node))
+            n_id = n_props.get("name", str(n_props))
+            m_id = m_props.get("name", str(m_props))
+
+            for node_id, props in [(n_id, n_props), (m_id, m_props)]:
                 if node_id not in nodes_seen:
                     nodes_seen.add(node_id)
-                    nodes.append({"id": node_id, "properties": node})
+                    nodes.append({"id": node_id, "properties": props})
 
             edges.append({
-                "source": n.get("name"),
-                "target": m.get("name"),
-                "type":   type(r).__name__ if r else "UNKNOWN",
+                "source": n_id,
+                "target": m_id,
+                "type":   r_type,
             })
 
         return {"nodes": nodes, "edges": edges}
@@ -135,18 +141,19 @@ def clear_graph() -> None:
         print(f"[graph_builder] WARNING: Failed to clear graph: {e}")
 
 
-def build_graph_from_detection(anomaly: bool, row: Dict[str, Any]) -> bool:
+def build_graph_from_detection(anomaly: bool, row: Dict[str, Any], flags: list = []) -> bool:
     """
-    Automatically build an attack graph entry when an anomaly is detected.
+    Automatically build an attack graph entry when an anomaly or rule fires.
 
     Args:
         anomaly: True if the ML model flagged this record as anomalous.
-        row:     Raw log dict (used for context, not directly mapped).
+        row:     Raw log dict.
+        flags:   List of triggered rule types.
 
     Returns:
-        False if anomaly is False or graph build fails, True on success.
+        False if nothing suspicious, True on successful graph write.
     """
-    if not anomaly and not row.get("failed_logins", 0) > 2:
+    if not anomaly and not row.get("failed_logins", 0) > 2 and not flags:
         return False
 
     uid     = random.randint(1000, 9999)
