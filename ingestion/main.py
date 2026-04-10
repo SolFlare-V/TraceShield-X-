@@ -14,6 +14,14 @@ from ingestion.models.schemas import IngestPayload, IngestResponse
 from ingestion.services.anomaly_detector import process_event
 from ingestion.services.ml_model import get_ml_score
 from ingestion.services.response_engine import get_full_state
+from ingestion.db.neo4j import (
+    get_all_relationships,
+    get_recent_attacks,
+    get_ip_history,
+    get_graph_summary,
+    get_attack_chain,
+    close_driver as close_neo4j,
+)
 from ingestion.db.neo4j_conn import close_driver
 
 logging.basicConfig(
@@ -26,11 +34,11 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Ingestion service starting — warming up ML model...")
-    # Warm up: triggers training on first call
     get_ml_score(50, datetime.now())
     logger.info("ML model ready. Service online.")
     yield
     close_driver()
+    close_neo4j()
     logger.info("Ingestion service shut down.")
 
 
@@ -100,3 +108,33 @@ def health():
 def blocked_list():
     """Return full in-memory response state with timestamps and reasons."""
     return get_full_state()
+
+
+@app.get("/graph")
+def graph_all():
+    """Fetch all Neo4j relationships for visualization."""
+    return {"relationships": get_all_relationships(100)}
+
+
+@app.get("/graph/attacks")
+def graph_attacks():
+    """Fetch recent ATTACKED relationships with metadata."""
+    return {"attacks": get_recent_attacks(20)}
+
+
+@app.get("/graph/ip/{ip_address}")
+def graph_ip(ip_address: str):
+    """Fetch all graph relationships for a specific IP."""
+    return {"ip": ip_address, "history": get_ip_history(ip_address)}
+
+
+@app.get("/graph/chain/{ip_address}")
+def graph_chain(ip_address: str):
+    """Fetch full attack chain path for an IP (IP → Device → Honeypot → System)."""
+    return {"ip": ip_address, "chain": get_attack_chain(ip_address)}
+
+
+@app.get("/graph/summary")
+def graph_summary():
+    """Return node and relationship counts."""
+    return get_graph_summary()
