@@ -1,28 +1,54 @@
 """
-anomaly_detector.py — Final decision logic with adaptive behavioral context.
+anomaly_detector.py — Detection + automated response orchestrator.
 """
 
 import logging
 from datetime import datetime
 
-from ingestion.services.risk_engine import compute_risk
-from ingestion.db.neo4j_conn import store_suspicious_activity
+from ingestion.services.risk_engine     import compute_risk
+from ingestion.services.response_engine import execute_response, is_blocked
+from ingestion.db.neo4j_conn            import store_suspicious_activity
 
 logger = logging.getLogger(__name__)
 
 
 def process_event(ip: str, device: str, request_count: int,
                   timestamp: datetime) -> dict:
+    """
+    Full real-time pipeline:
+        1. Compute weighted risk score (ML+temporal+count+spike+trend).
+        2. Execute automated response (flag / block / honeypot).
+        3. Persist to Neo4j.
+        4. Return structured result.
+    """
     logger.info("INGEST | ip=%-16s device=%-20s count=%d ts=%s",
                 ip, device, request_count, timestamp.isoformat())
+
+    # Already blocked — short-circuit
+    if is_blocked(ip):
+        logger.warning("BLOCKED IP attempted access | ip=%s device=%s", ip, device)
+        return {
+            "status":       "HIGH_RISK",
+            "risk_score":   100.0,
+            "graph_stored": False,
+            "components":   {},
+            "response":     {"actions_taken": ["blocked"], "blocked": True,
+                             "redirected_to_honeypot": True,
+                             "flag_count": 0, "reason": "previously_blocked"},
+            "message":      f"BLOCKED: {ip} is on the block list.",
+        }
 
     result = compute_risk(ip, request_count, timestamp)
     score  = result["risk_score"]
     status = result["status"]
     comps  = result["components"]
 
-    _log_result(ip, device, score, status, comps)
+    # Automated response
+    response = execute_response(ip, status, comps)
 
+    _log_result(ip, device, score, status, comps, response)
+
+    # Persist non-normal events
     graph_stored = False
     if status in ("SUSPICIOUS", "HIGH_RISK"):
         graph_stored = store_suspicious_activity(
@@ -30,10 +56,10 @@ def process_event(ip: str, device: str, request_count: int,
             request_count=request_count,
             timestamp=timestamp.isoformat(),
             risk_score=score, status=status,
-            ml_score=comps["ml_score"],
-            temporal_score=comps["temporal_score"],
-            count_score=comps["count_score"],
-            spike_score=comps.get("spike_score", 0.0),
+            ml_score=comps.get("ml_score", 0),
+            temporal_score=comps.get("temporal_score", 0),
+            count_score=comps.get("count_score", 0),
+            spike_score=comps.get("spike_score", 0),
         )
 
     return {
@@ -41,60 +67,59 @@ def process_event(ip: str, device: str, request_count: int,
         "risk_score":   score,
         "graph_stored": graph_stored,
         "components":   comps,
+        "response":     response,
         "message":      _build_message(ip, device, request_count,
-                                       score, status, comps),
+                                       score, status, comps, response),
     }
 
 
-def _log_result(ip, device, score, status, comps):
-    avg   = comps.get("avg_previous", 0)
-    dev   = comps.get("deviation", 0)
-    spike = comps.get("spike_score", 0)
-
+def _log_result(ip, device, score, status, comps, response):
     reasons = []
-    if comps["ml_score"] >= 60:
-        reasons.append(f"ML anomaly ({comps['ml_score']:.1f})")
-    if comps["temporal_score"] >= 50:
-        reasons.append(f"high rate ({comps['temporal_score']:.1f})")
-    if spike >= 50:
-        reasons.append(f"spike {dev:.1f}x above avg {avg:.0f}")
-    if comps["count_score"] >= 60:
-        reasons.append(f"high volume ({comps['count_score']:.1f})")
+    if comps.get("spike_score", 0) > 70:
+        reasons.append(f"spike={comps['spike_score']:.1f}")
+    if comps.get("trend_score", 0) > 60:
+        reasons.append(f"trend={comps['trend_score']:.1f}")
+    if comps.get("ml_score", 0) >= 60:
+        reasons.append(f"ml={comps['ml_score']:.1f}")
+    if comps.get("temporal_score", 0) >= 50:
+        reasons.append(f"rate={comps['temporal_score']:.1f}")
+    reason = " + ".join(reasons) if reasons else "combined"
 
-    reason = " + ".join(reasons) if reasons else "within baseline"
+    actions = ", ".join(response["actions_taken"]) or "none"
 
     if status == "HIGH_RISK":
         logger.warning(
-            "HIGH_RISK | ip=%s device=%s score=%.2f | %s "
-            "| hist_avg=%.1f deviation=%.2fx spike=%.1f",
-            ip, device, score, reason, avg, max(dev, 0), spike
+            "HIGH_RISK | ip=%s score=%.2f | reason: %s | actions: %s",
+            ip, score, reason, actions
         )
     elif status == "SUSPICIOUS":
         logger.warning(
-            "SUSPICIOUS | ip=%s device=%s score=%.2f | %s "
-            "| hist_avg=%.1f deviation=%.2fx",
-            ip, device, score, reason, avg, max(dev, 0)
+            "SUSPICIOUS | ip=%s score=%.2f | reason: %s | actions: %s",
+            ip, score, reason, actions
         )
     else:
-        logger.info("NORMAL | ip=%s device=%s score=%.2f | hist_avg=%.1f",
-                    ip, device, score, avg)
+        logger.info("NORMAL | ip=%s score=%.2f", ip, score)
 
 
-def _build_message(ip, device, count, score, status, comps) -> str:
-    avg = comps.get("avg_previous", 0)
-    dev = comps.get("deviation", 0)
-
+def _build_message(ip, device, count, score, status, comps, response) -> str:
     reasons = []
-    if comps["ml_score"] >= 60:
-        reasons.append("behavioral anomaly detected by ML")
-    if comps.get("spike_score", 0) >= 50:
-        reasons.append(f"spike {dev:.1f}x above historical avg ({avg:.0f})")
-    if comps["temporal_score"] >= 50:
-        reasons.append("abnormal request rate")
+    if comps.get("spike_score", 0) > 70:
+        reasons.append("sudden spike detected")
+    if comps.get("trend_score", 0) > 60:
+        reasons.append("escalating trend")
+    if comps.get("ml_score", 0) >= 60:
+        reasons.append("behavioral anomaly")
     if not reasons:
         reasons.append("within normal parameters")
 
+    actions = response["actions_taken"]
+    action_str = ""
+    if "blocked" in actions:
+        action_str = " IP has been BLOCKED and redirected to honeypot."
+    elif "flagged" in actions:
+        action_str = f" IP flagged (count={response['flag_count']})."
+
     prefix = {"HIGH_RISK": "HIGH RISK", "SUSPICIOUS": "SUSPICIOUS",
               "NORMAL": "NORMAL"}[status]
-    return (f"{prefix}: {count} requests from {ip} via {device}. "
-            f"Risk: {score:.1f}/100. {'; '.join(reasons)}.")
+    return (f"{prefix}: {count} reqs from {ip} via {device}. "
+            f"Score: {score:.1f}/100. {'; '.join(reasons)}.{action_str}")

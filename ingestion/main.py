@@ -12,7 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from ingestion.models.schemas import IngestPayload, IngestResponse
 from ingestion.services.anomaly_detector import process_event
-from ingestion.services.ml_model import get_ml_score   # warm-up import
+from ingestion.services.ml_model import get_ml_score
+from ingestion.services.response_engine import _blocked_ips, _honeypot_ips, _flagged_ips
 from ingestion.db.neo4j_conn import close_driver
 
 logging.basicConfig(
@@ -83,6 +84,7 @@ def ingest(payload: IngestPayload) -> IngestResponse:
             timestamp=ts,
             graph_stored=result["graph_stored"],
             components=result["components"],
+            response=result["response"],
         )
     except Exception as exc:
         logger.error("Ingest error: %s", exc)
@@ -92,3 +94,13 @@ def ingest(payload: IngestPayload) -> IngestResponse:
 @app.get("/health")
 def health():
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/blocked")
+def blocked_list():
+    """Return current in-memory blocked/flagged/honeypot state."""
+    return {
+        "blocked_ips":   list(_blocked_ips),
+        "honeypot_ips":  list(_honeypot_ips),
+        "flagged_ips":   dict(_flagged_ips),
+    }
