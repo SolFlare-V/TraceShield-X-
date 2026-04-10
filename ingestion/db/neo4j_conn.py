@@ -49,15 +49,14 @@ def close_driver() -> None:
             _driver = None
 
 
-def store_suspicious_activity(ip: str, device: str, request_count: int, timestamp: str) -> bool:
-    """
-    Persist a suspicious activity event in Neo4j.
-
-    Graph pattern:
-        (:IP {address})-[:SUSPICIOUS_ACTIVITY {request_count, timestamp}]->(:Device {name})
-
-    Returns True on success, False if Neo4j is unavailable.
-    """
+def store_suspicious_activity(ip: str, device: str, request_count: int,
+                              timestamp: str, risk_score: float = 0.0,
+                              status: str = "SUSPICIOUS",
+                              ml_score: float = 0.0,
+                              temporal_score: float = 0.0,
+                              count_score: float = 0.0,
+                              spike_score: float = 0.0) -> bool:
+    """Persist event with full component breakdown including spike score."""
     driver = get_driver()
     if driver is None:
         logger.warning("Skipping Neo4j write — driver unavailable.")
@@ -66,13 +65,22 @@ def store_suspicious_activity(ip: str, device: str, request_count: int, timestam
     query = (
         "MERGE (i:IP {address: $ip}) "
         "MERGE (d:Device {name: $device}) "
-        "CREATE (i)-[:SUSPICIOUS_ACTIVITY {request_count: $request_count, timestamp: $timestamp}]->(d)"
+        "CREATE (i)-[:SUSPICIOUS_ACTIVITY {"
+        "  request_count: $request_count, timestamp: $timestamp, "
+        "  risk_score: $risk_score, status: $status, "
+        "  ml_score: $ml_score, temporal_score: $temporal_score, "
+        "  count_score: $count_score, spike_score: $spike_score"
+        "}]->(d)"
     )
     try:
         with driver.session() as session:
             session.run(query, ip=ip, device=device,
-                        request_count=request_count, timestamp=timestamp)
-        logger.info("Stored suspicious activity: %s -> %s (%d reqs)", ip, device, request_count)
+                        request_count=request_count, timestamp=timestamp,
+                        risk_score=risk_score, status=status,
+                        ml_score=ml_score, temporal_score=temporal_score,
+                        count_score=count_score, spike_score=spike_score)
+        logger.info("Stored [%s] ip=%s score=%.2f spike=%.1f",
+                    status, ip, risk_score, spike_score)
         return True
     except Exception as exc:
         logger.warning("Neo4j write failed: %s", exc)
