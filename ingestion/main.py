@@ -8,7 +8,7 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -219,7 +219,7 @@ async def dataset_logs(body: DatasetLogsRequest):
             raise HTTPException(status_code=400, detail="log_lines must not be empty")
 
         # Step 1: parse + aggregate per-IP using linux_log_parser
-        from ingestion.services.linux_log_parser import parse_lines, aggregate_by_ip
+        from ingestion.services.linux_log_parser import parse_lines, aggregate_by_ip, compute_request_count, build_reason
         events, total, valid = parse_lines(body.log_lines)
         by_ip = aggregate_by_ip(events)
 
@@ -242,7 +242,7 @@ async def dataset_logs(body: DatasetLogsRequest):
             result = process_event(
                 ip=ip,
                 device="dataset_log",
-                request_count=max(features.get("total_events", 1), 1),
+                request_count=compute_request_count(features),
                 timestamp=ts,
             )
 
@@ -265,6 +265,8 @@ async def dataset_logs(body: DatasetLogsRequest):
                 "log_score":     result["components"].get("log_score", 0),
                 "ml_score":      result["components"].get("ml_score", 0),
                 "timestamp":     ts.isoformat(),
+                "usernames":     features.get("usernames", []),
+                "log_signals":   build_reason(features),
             }
             # Broadcast immediately, then yield to event loop so the WS message
             # is flushed to clients before processing the next IP (live stream effect)
@@ -303,6 +305,99 @@ async def dataset_logs(body: DatasetLogsRequest):
         raise
     except Exception as exc:
         logger.error("dataset/logs error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/dataset/upload")
+async def dataset_upload(file: UploadFile = File(...)):
+    """
+    Upload a Linux log file directly (auth.log, syslog, audit.log, etc.).
+    Processes it through the same pipeline as /dataset/logs.
+
+    Accepts: any .log, .txt, or plain text file.
+    """
+    try:
+        content = await file.read()
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError:
+            text = content.decode("latin-1")  # fallback for non-UTF8 logs
+
+        lines = text.splitlines()
+        logger.info("DATASET/UPLOAD | file=%s lines=%d", file.filename, len(lines))
+
+        # Reuse the same dataset/logs logic
+        from ingestion.services.linux_log_parser import parse_lines, aggregate_by_ip, compute_request_count, build_reason
+        events, total, valid = parse_lines(lines)
+        by_ip = aggregate_by_ip(events)
+
+        results = []
+        anomaly_count = 0
+
+        for ip, features in by_ip.items():
+            ingest_logs_for_ip(ip, [ev["raw"] for ev in events if ev.get("ip") == ip])
+
+            ts = datetime.now(timezone.utc).replace(tzinfo=None)
+            result = process_event(
+                ip=ip,
+                device=f"upload:{file.filename}",
+                request_count=compute_request_count(features),
+                timestamp=ts,
+            )
+
+            status   = result["status"]
+            score    = result["risk_score"]
+            response = result["response"]
+
+            if status != "NORMAL":
+                anomaly_count += 1
+
+            ws_payload = {
+                "ip":          ip,
+                "device":      f"upload:{file.filename}",
+                "request_count": features.get("total_events", 1),
+                "status":      status,
+                "risk_score":  score,
+                "actions":     response.get("actions_taken", []),
+                "reason":      response.get("reason", "N/A"),
+                "log_score":   result["components"].get("log_score", 0),
+                "ml_score":    result["components"].get("ml_score", 0),
+                "timestamp":   ts.isoformat(),
+                "usernames":   features.get("usernames", []),
+                "log_signals": build_reason(features),
+            }
+            await _ws_manager.broadcast(ws_payload)
+            await asyncio.sleep(0.075)
+
+            results.append({
+                "ip":         ip,
+                "risk_score": score,
+                "status":     status,
+                "actions":    response.get("actions_taken", []),
+                "reason":     response.get("reason", "N/A"),
+                "features":   features,
+                "components": result["components"],
+            })
+
+        results.sort(key=lambda r: r["risk_score"], reverse=True)
+
+        logger.info("DATASET/UPLOAD DONE | file=%s ips=%d anomalies=%d",
+                    file.filename, len(by_ip), anomaly_count)
+
+        return {
+            "filename": file.filename,
+            "summary": {
+                "total_lines":  total,
+                "valid_events": valid,
+                "unique_ips":   len(by_ip),
+                "anomalies":    anomaly_count,
+            },
+            "results": results,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("dataset/upload error: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
 

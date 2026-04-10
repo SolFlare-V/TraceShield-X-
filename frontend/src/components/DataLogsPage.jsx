@@ -1,4 +1,233 @@
 import { useState, useEffect, useRef } from 'react';
+import axios from 'axios';
+
+const ingest = axios.create({ baseURL: 'http://127.0.0.1:8001' })
+
+const STATUS_META = {
+  EXTREME_RISK: { label: 'EXTREME RISK', color: 'text-[#FF003C]', bg: 'bg-[#FF003C]/10', border: 'border-[#FF003C]/40', dot: 'bg-[#FF003C]' },
+  HIGH_RISK:    { label: 'HIGH RISK',    color: 'text-orange-400', bg: 'bg-orange-900/20', border: 'border-orange-700/40', dot: 'bg-orange-400' },
+  SUSPICIOUS:   { label: 'SUSPICIOUS',   color: 'text-yellow-400', bg: 'bg-yellow-900/20', border: 'border-yellow-700/40', dot: 'bg-yellow-400' },
+  NORMAL:       { label: 'NORMAL',       color: 'text-[#39FF14]',  bg: 'bg-[#39FF14]/5',  border: 'border-[#39FF14]/20',  dot: 'bg-[#39FF14]' },
+}
+
+// ── Log Upload Panel ──────────────────────────────────────────────────────────
+function LogUploadPanel() {
+  const [file, setFile]         = useState(null)
+  const [status, setStatus]     = useState('idle')   // idle | uploading | done | error
+  const [summary, setSummary]   = useState(null)
+  const [results, setResults]   = useState([])
+  const [dragOver, setDragOver] = useState(false)
+  const [selected, setSelected] = useState(null)    // selected IP row for detail
+  const inputRef = useRef(null)
+
+  const handleFile = (f) => {
+    if (!f) return
+    setFile(f)
+    setSummary(null)
+    setResults([])
+    setSelected(null)
+    setStatus('idle')
+  }
+
+  const upload = async () => {
+    if (!file) return
+    setStatus('uploading')
+    setSummary(null)
+    setResults([])
+    setSelected(null)
+    try {
+      const form = new FormData()
+      form.append('file', file)
+      const r = await ingest.post('/dataset/upload', form, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
+      setSummary(r.data.summary)
+      setResults(r.data.results || [])
+      setStatus('done')
+    } catch (e) {
+      setStatus('error')
+    }
+  }
+
+  const reset = () => { setFile(null); setSummary(null); setResults([]); setSelected(null); setStatus('idle') }
+
+  return (
+    <div className="rounded-xl border border-[#1E2D4A] bg-[#0D1323]/60 p-5 mb-6">
+      {/* Header */}
+      <div className="flex items-center gap-2 mb-4">
+        <i className="ph ph-upload-simple text-[#00F0FF] text-lg" />
+        <span className="text-[11px] font-bold text-[#94A3B8] uppercase tracking-widest mono-text">
+          Log File Analysis
+        </span>
+        <span className="ml-auto text-[10px] text-[#1E2D4A] mono-text">
+          auth.log · syslog · audit.log · kern.log · any format
+        </span>
+      </div>
+
+      {/* Drop zone */}
+      <div
+        onDragOver={e => { e.preventDefault(); setDragOver(true) }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={e => { e.preventDefault(); setDragOver(false); handleFile(e.dataTransfer.files[0]) }}
+        onClick={() => inputRef.current?.click()}
+        className={`relative flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed cursor-pointer transition-all py-6
+          ${dragOver ? 'border-[#00F0FF] bg-[#00F0FF]/5' : file ? 'border-[#39FF14]/50 bg-[#39FF14]/5' : 'border-[#1E2D4A] hover:border-[#00F0FF]/40 hover:bg-[#00F0FF]/5'}`}
+      >
+        <input ref={inputRef} type="file" accept=".log,.txt,text/plain" className="hidden"
+          onChange={e => handleFile(e.target.files[0])} />
+        {file ? (
+          <>
+            <i className="ph ph-file-text text-3xl text-[#39FF14]" />
+            <span className="text-sm font-bold text-[#39FF14] mono-text">{file.name}</span>
+            <span className="text-[10px] text-[#94A3B8] mono-text">{(file.size / 1024).toFixed(1)} KB · click to change</span>
+          </>
+        ) : (
+          <>
+            <i className="ph ph-cloud-arrow-up text-3xl text-[#1E2D4A]" />
+            <span className="text-sm text-[#94A3B8] mono-text">Drop log file here or click to browse</span>
+            <span className="text-[10px] text-[#1E2D4A] mono-text">.log · .txt · any Linux log format</span>
+          </>
+        )}
+      </div>
+
+      {/* Action bar */}
+      <div className="flex items-center gap-3 mt-3 flex-wrap">
+        <button onClick={upload} disabled={!file || status === 'uploading'}
+          className="cyber-btn h-9 px-5 text-[11px] disabled:opacity-40 disabled:cursor-not-allowed">
+          {status === 'uploading'
+            ? <><i className="ph ph-spinner animate-spin text-sm" /> Analyzing...</>
+            : <><i className="ph ph-magnifying-glass text-sm" /> Analyze Log</>}
+        </button>
+        {file && <button onClick={reset} className="text-[11px] text-[#94A3B8] hover:text-[#FF003C] mono-text transition-colors">
+          <i className="ph ph-x text-xs" /> Clear
+        </button>}
+
+        {status === 'done' && summary && (
+          <div className="flex items-center gap-4 ml-auto text-[11px] mono-text flex-wrap">
+            <span className="text-[#94A3B8]"><span className="text-white font-bold">{summary.total_lines?.toLocaleString()}</span> lines</span>
+            <span className="text-[#94A3B8]"><span className="text-[#00F0FF] font-bold">{summary.valid_events?.toLocaleString()}</span> events</span>
+            <span className="text-[#94A3B8]"><span className="text-[#00F0FF] font-bold">{summary.unique_ips}</span> IPs</span>
+            <span className={`font-bold ${summary.anomalies > 0 ? 'text-[#FF003C]' : 'text-[#39FF14]'}`}>
+              {summary.anomalies} anomalies detected
+            </span>
+            <span className="text-[#39FF14]"><i className="ph ph-broadcast" /> Streamed to Live Feed</span>
+          </div>
+        )}
+        {status === 'error' && (
+          <span className="ml-auto text-[11px] text-[#FF003C] mono-text">
+            <i className="ph ph-warning-octagon" /> Upload failed — is port 8001 running?
+          </span>
+        )}
+      </div>
+
+      {/* ── Results table ── */}
+      {status === 'done' && results.length > 0 && (
+        <div className="mt-5">
+          <div className="flex items-center gap-2 mb-3">
+            <i className="ph ph-table text-[#00F0FF] text-sm" />
+            <span className="text-[11px] font-bold text-[#94A3B8] uppercase tracking-widest mono-text">
+              Per-IP Detection Results
+            </span>
+            <span className="ml-auto text-[10px] text-[#94A3B8] mono-text">click a row for details</span>
+          </div>
+
+          {/* Table header */}
+          <div className="grid grid-cols-12 gap-2 px-3 py-2 text-[9px] font-bold text-[#94A3B8] uppercase tracking-widest mono-text border-b border-[#1E2D4A]">
+            <div className="col-span-3">IP Address</div>
+            <div className="col-span-2">Status</div>
+            <div className="col-span-1 text-right">Score</div>
+            <div className="col-span-2">Actions</div>
+            <div className="col-span-4">Signals</div>
+          </div>
+
+          {/* Table rows */}
+          <div className="max-h-72 overflow-y-auto">
+            {results.map((r, i) => {
+              const m = STATUS_META[r.status] || STATUS_META.NORMAL
+              const isSelected = selected === i
+              return (
+                <div key={i} onClick={() => setSelected(isSelected ? null : i)}
+                  className={`grid grid-cols-12 gap-2 px-3 py-2.5 cursor-pointer transition-all border-b border-[#1E2D4A]/30 mono-text text-[11px]
+                    ${isSelected ? 'bg-[#00F0FF]/5 border-l-2 border-l-[#00F0FF]' : 'hover:bg-[#121A2F]'}`}>
+
+                  {/* IP */}
+                  <div className="col-span-3 flex items-center gap-1.5">
+                    <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${m.dot}`} />
+                    <span className="text-[#E2E8F0] font-bold truncate">{r.ip}</span>
+                  </div>
+
+                  {/* Status badge */}
+                  <div className="col-span-2">
+                    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${m.bg} ${m.border} ${m.color}`}>
+                      {m.label}
+                    </span>
+                  </div>
+
+                  {/* Score */}
+                  <div className={`col-span-1 text-right font-bold ${m.color}`}>
+                    {r.risk_score?.toFixed(1)}
+                  </div>
+
+                  {/* Actions */}
+                  <div className="col-span-2 flex gap-1 flex-wrap">
+                    {(r.actions || []).map((a, j) => (
+                      <span key={j} className="text-[9px] px-1 py-0.5 rounded bg-[#1E2D4A] text-[#94A3B8] uppercase">{a}</span>
+                    ))}
+                  </div>
+
+                  {/* Reason / signals */}
+                  <div className="col-span-4 text-[#94A3B8] truncate">{r.reason || '—'}</div>
+                </div>
+              )
+            })}
+          </div>
+
+          {/* ── Detail panel for selected row ── */}
+          {selected !== null && results[selected] && (() => {
+            const r = results[selected]
+            const m = STATUS_META[r.status] || STATUS_META.NORMAL
+            const f = r.features || {}
+            return (
+              <div className={`mt-3 rounded-lg border p-4 ${m.bg} ${m.border}`}>
+                <div className="flex items-center justify-between mb-3">
+                  <span className={`text-sm font-bold mono-text ${m.color}`}>{r.ip}</span>
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${m.bg} ${m.border} ${m.color}`}>{m.label}</span>
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-[11px] mono-text mb-3">
+                  <div><div className="text-[#94A3B8] text-[9px] uppercase mb-0.5">Risk Score</div><div className={`font-bold text-lg ${m.color}`}>{r.risk_score?.toFixed(2)}</div></div>
+                  <div><div className="text-[#94A3B8] text-[9px] uppercase mb-0.5">Failed Logins</div><div className="font-bold text-white">{f.failed_logins ?? 0}</div></div>
+                  <div><div className="text-[#94A3B8] text-[9px] uppercase mb-0.5">Sudo Attempts</div><div className="font-bold text-white">{f.sudo_attempts ?? 0}</div></div>
+                  <div><div className="text-[#94A3B8] text-[9px] uppercase mb-0.5">Suspicious Cmds</div><div className="font-bold text-white">{f.suspicious_commands ?? 0}</div></div>
+                  <div><div className="text-[#94A3B8] text-[9px] uppercase mb-0.5">Sensitive Files</div><div className="font-bold text-white">{f.sensitive_file_accesses ?? 0}</div></div>
+                  <div><div className="text-[#94A3B8] text-[9px] uppercase mb-0.5">Port Scans</div><div className="font-bold text-white">{f.port_scans ?? 0}</div></div>
+                  <div><div className="text-[#94A3B8] text-[9px] uppercase mb-0.5">Priv Escalation</div><div className="font-bold text-white">{f.privilege_escalations ?? 0}</div></div>
+                  <div><div className="text-[#94A3B8] text-[9px] uppercase mb-0.5">Total Events</div><div className="font-bold text-white">{f.total_events ?? 0}</div></div>
+                </div>
+                {f.usernames?.length > 0 && (
+                  <div className="text-[11px] mono-text mb-2">
+                    <span className="text-[#94A3B8] text-[9px] uppercase">Usernames seen: </span>
+                    <span className="text-[#00F0FF]">{f.usernames.join(', ')}</span>
+                  </div>
+                )}
+                <div className="text-[11px] mono-text">
+                  <span className="text-[#94A3B8] text-[9px] uppercase">Signals: </span>
+                  <span className="text-[#E2E8F0]">{r.reason || 'none'}</span>
+                </div>
+                {(r.actions || []).length > 0 && (
+                  <div className="flex gap-2 mt-2">
+                    {r.actions.map((a, j) => (
+                      <span key={j} className={`text-[9px] font-bold px-2 py-0.5 rounded border uppercase ${m.bg} ${m.border} ${m.color}`}>{a}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          })()}
+        </div>
+      )}
+    </div>
+  )
+}
 
 // ── Log source definitions ────────────────────────────────────────────────────
 const LOG_SOURCES = [
@@ -181,6 +410,9 @@ export default function DataLogsPage() {
 
   return (
     <div className="animate-fadeIn flex flex-col gap-0 h-full" style={{ minHeight: '80vh' }}>
+      {/* Log file upload panel */}
+      <LogUploadPanel />
+
       {/* Page header */}
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 pb-6 border-b border-[#1E2D4A]/50 mb-6">
         <div>

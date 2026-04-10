@@ -1,10 +1,15 @@
 """
 linux_log_parser.py — Robust Linux log dataset parser for TraceShield.
 
-Handles unknown/mixed log formats: auth.log, syslog, audit.log, kern.log.
-Extracts security features per-line, aggregates per-IP, feeds risk engine.
+Handles real-world Linux log formats: auth.log, syslog, audit.log, kern.log,
+fail2ban.log, secure, messages — any unknown format.
 
-Never crashes on malformed input — all parsing is wrapped in try/except.
+Design principles:
+  - Never crashes on malformed input (all parsing in try/except)
+  - Extracts IP, username, timestamp from any line format
+  - IP defaults to 'unknown' only when truly absent
+  - 'unknown' bucket is kept separate and not inflated
+  - request_count fed to process_event() reflects attack intensity
 """
 
 import re
@@ -15,50 +20,196 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# ── Regex patterns ────────────────────────────────────────────────────────────
+# ── IP extraction ─────────────────────────────────────────────────────────────
 
 _RE_IP = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b')
 
+# ── Username extraction ───────────────────────────────────────────────────────
+
+_RE_USER = re.compile(
+    r'(?:for|user|USER=|acct=|by)\s+([a-zA-Z0-9_\-\.]+)',
+    re.IGNORECASE,
+)
+
+# ── Timestamp extraction (syslog / ISO / audit formats) ──────────────────────
+
+_RE_SYSLOG_TS = re.compile(
+    r'^(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})'   # Apr 10 03:12:44
+)
+_RE_ISO_TS = re.compile(
+    r'(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})'  # 2024-04-10T03:12:44
+)
+_RE_AUDIT_TS = re.compile(
+    r'msg=audit\((\d+\.\d+)'                       # msg=audit(1712700000.123
+)
+
+# ── Security signal patterns ──────────────────────────────────────────────────
+
 _RE_FAILED_LOGIN = re.compile(
-    r'Failed password|authentication failure|Invalid user|FAILED LOGIN'
-    r'|pam_unix.*auth.*failure|no such user|illegal user',
+    r'Failed password'
+    r'|authentication failure'
+    r'|Invalid user'
+    r'|FAILED LOGIN'
+    r'|pam_unix.*auth.*failure'
+    r'|no such user'
+    r'|illegal user'
+    r'|input_userauth_request.*invalid user'
+    r'|Connection closed by.*\[preauth\]'
+    r'|Disconnected from.*\[preauth\]',
     re.IGNORECASE,
 )
+
 _RE_SUCCESS_LOGIN = re.compile(
-    r'Accepted password|Accepted publickey|session opened for user'
-    r'|New session|logged in',
+    r'Accepted password'
+    r'|Accepted publickey'
+    r'|session opened for user'
+    r'|New session \d+ of user'
+    r'|Successful su for'
+    r'|pam_unix.*session.*opened',
     re.IGNORECASE,
 )
+
 _RE_SUDO = re.compile(
-    r'\bsudo\b.*COMMAND=|COMMAND=.*sudo|sudo\[',
+    # Real sudo log: "username : TTY=pts/0 ; PWD=/root ; USER=root ; COMMAND=/bin/bash"
+    r'sudo\s*:\s*\w+\s*:.*COMMAND='
+    # sudo with COMMAND= anywhere
+    r'|COMMAND=\S+'
+    # sudo[ in syslog
+    r'|sudo\[\d+\]'
+    # audit sudo
+    r'|type=USER_CMD',
     re.IGNORECASE,
 )
+
 _RE_SUSPICIOUS = re.compile(
-    r'\bnc\b[\s-]|netcat|bash\s+-i|sh\s+-i|chmod\s+777'
-    r'|wget\s+https?://|curl\s+https?://'
-    r'|python[23]?\s+-c|perl\s+-e|ruby\s+-e'
-    r'|/dev/tcp|mkfifo|base64\s+-d'
-    r'|\bnmap\b|\bhydra\b|\bmetasploit\b',
+    r'\bnc\b[\s-]|\bnc\s+-[lep]'       # netcat
+    r'|netcat'
+    r'|bash\s+-i'                        # reverse shell
+    r'|sh\s+-i'
+    r'|/bin/bash\s+-i'
+    r'|chmod\s+[0-7]*777'               # world-writable
+    r'|chmod\s+\+[xs]'                  # setuid/setgid
+    r'|wget\s+https?://'                # download
+    r'|curl\s+https?://'
+    r'|python[23]?\s+-c'                # inline exec
+    r'|perl\s+-e'
+    r'|ruby\s+-e'
+    r'|/dev/tcp'                         # bash tcp redirect
+    r'|mkfifo'                           # named pipe
+    r'|base64\s+-d'                      # decode payload
+    r'|\bnmap\b'                         # scanner
+    r'|\bhydra\b'                        # brute force tool
+    r'|\bmetasploit\b'
+    r'|\bmsfconsole\b'
+    r'|dd\s+if=/dev/'                    # disk wipe
+    r'|rm\s+-rf\s+/'                     # destructive
+    r'|>\s*/dev/null\s+2>&1.*&'          # background process hiding
+    r'|crontab\s+-[lr]'                  # cron manipulation
+    r'|iptables\s+-F'                    # firewall flush
+    r'|history\s+-[cw]',                 # log clearing
     re.IGNORECASE,
 )
+
 _RE_SENSITIVE = re.compile(
-    r'/etc/passwd|/etc/shadow|/etc/sudoers|/root/\.ssh'
-    r'|/var/log/auth|/proc/\d+|/sys/kernel'
-    r'|/etc/crontab|/etc/cron\.',
+    r'/etc/passwd'
+    r'|/etc/shadow'
+    r'|/etc/sudoers'
+    r'|/etc/sudoers\.d'
+    r'|/root/\.ssh'
+    r'|/home/\w+/\.ssh'
+    r'|/var/log/auth'
+    r'|/proc/\d+/mem'
+    r'|/sys/kernel/security'
+    r'|/etc/crontab'
+    r'|/etc/cron\.'
+    r'|/etc/hosts'
+    r'|/etc/hostname'
+    r'|/etc/network'
+    r'|/boot/grub'
+    r'|/etc/ssl/private',
     re.IGNORECASE,
 )
+
 _RE_PORT_SCAN = re.compile(
-    r'UFW BLOCK|iptables.*DROP|port scan|SCAN detected'
-    r'|SYN flood|connection refused.*repeated',
+    r'UFW BLOCK'
+    r'|iptables.*DROP'
+    r'|port scan'
+    r'|SCAN detected'
+    r'|SYN flood'
+    r'|Too many connections'
+    r'|repeated connection attempts'
+    r'|DPT=\d+.*repeated'
+    r'|PROTO=TCP.*DPT=\d+.*SRC=\S+.*repeated'
+    r'|kernel:.*\[UFW BLOCK\]',
     re.IGNORECASE,
 )
+
 _RE_PRIVILEGE_ESC = re.compile(
-    r'su\s*:\s*FAILED|su\s*:\s*pam_authenticate'
-    r'|pkexec|polkit|CVE-\d{4}-\d+',
+    r'su\s*:\s*FAILED'
+    r'|su\s*:\s*pam_authenticate'
+    r'|pkexec'
+    r'|polkit'
+    r'|CVE-\d{4}-\d+'
+    r'|type=USER_AUTH.*res=failed'
+    r'|type=SYSCALL.*comm="su"'
+    r'|sudo.*incorrect password'
+    r'|sudo.*3 incorrect password',
+    re.IGNORECASE,
+)
+
+_RE_LOG_CLEARED = re.compile(
+    r'rm\s+.*auth\.log'
+    r'|>\s*/var/log'
+    r'|truncate.*log'
+    r'|shred.*log'
+    r'|type=CONFIG_CHANGE'
+    r'|auditd.*log.*deleted',
+    re.IGNORECASE,
+)
+
+_RE_RECON = re.compile(
+    r'\bwhoami\b'
+    r'|\bid\b'
+    r'|\buname\s+-a\b'
+    r'|\bcat\s+/etc/os-release\b'
+    r'|\bls\s+-la\s+/root\b'
+    r'|\bfind\s+/\s+-name\b'
+    r'|\bps\s+aux\b'
+    r'|\bnetstat\b'
+    r'|\bss\s+-'
+    r'|\bip\s+addr\b',
     re.IGNORECASE,
 )
 
 # ── Per-line feature extraction ───────────────────────────────────────────────
+
+def _extract_timestamp(line: str) -> Optional[str]:
+    """Try to extract a timestamp string from a log line."""
+    m = _RE_ISO_TS.search(line)
+    if m:
+        return m.group(1)
+    m = _RE_SYSLOG_TS.match(line)
+    if m:
+        return m.group(1)
+    m = _RE_AUDIT_TS.search(line)
+    if m:
+        try:
+            return datetime.fromtimestamp(float(m.group(1))).isoformat()
+        except Exception:
+            pass
+    return None
+
+
+def _extract_username(line: str) -> Optional[str]:
+    """Try to extract a username from a log line."""
+    m = _RE_USER.search(line)
+    if m:
+        candidate = m.group(1)
+        # Filter out common false positives
+        if candidate.lower() not in ('from', 'by', 'for', 'user', 'the', 'a', 'an'):
+            return candidate
+    return None
+
 
 def parse_line(line: str) -> Optional[Dict[str, Any]]:
     """
@@ -77,13 +228,17 @@ def parse_line(line: str) -> Optional[Dict[str, Any]]:
 
         return {
             "ip":                   ip,
-            "failed_login":         1 if _RE_FAILED_LOGIN.search(line)   else 0,
-            "successful_login":     1 if _RE_SUCCESS_LOGIN.search(line)  else 0,
-            "sudo_attempt":         1 if _RE_SUDO.search(line)           else 0,
-            "suspicious_command":   1 if _RE_SUSPICIOUS.search(line)     else 0,
-            "sensitive_file_access":1 if _RE_SENSITIVE.search(line)      else 0,
-            "port_scan":            1 if _RE_PORT_SCAN.search(line)      else 0,
-            "privilege_escalation": 1 if _RE_PRIVILEGE_ESC.search(line)  else 0,
+            "username":             _extract_username(line),
+            "log_timestamp":        _extract_timestamp(line),
+            "failed_login":         1 if _RE_FAILED_LOGIN.search(line)    else 0,
+            "successful_login":     1 if _RE_SUCCESS_LOGIN.search(line)   else 0,
+            "sudo_attempt":         1 if _RE_SUDO.search(line)            else 0,
+            "suspicious_command":   1 if _RE_SUSPICIOUS.search(line)      else 0,
+            "sensitive_file_access":1 if _RE_SENSITIVE.search(line)       else 0,
+            "port_scan":            1 if _RE_PORT_SCAN.search(line)       else 0,
+            "privilege_escalation": 1 if _RE_PRIVILEGE_ESC.search(line)   else 0,
+            "log_cleared":          1 if _RE_LOG_CLEARED.search(line)     else 0,
+            "recon":                1 if _RE_RECON.search(line)           else 0,
             "raw":                  line,
         }
     except Exception as exc:
@@ -116,10 +271,11 @@ def parse_lines(lines: List[str]) -> Tuple[List[Dict[str, Any]], int, int]:
 def aggregate_by_ip(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """
     Group parsed events by IP and sum security feature counts.
+    'unknown' IPs are tracked separately and not mixed with real IPs.
 
-    Returns dict: ip → aggregated feature counts
+    Returns dict: ip → aggregated feature counts + usernames seen
     """
-    agg: Dict[str, Dict[str, int]] = defaultdict(lambda: {
+    agg: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
         "failed_logins":           0,
         "successful_logins":       0,
         "sudo_attempts":           0,
@@ -127,7 +283,12 @@ def aggregate_by_ip(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         "sensitive_file_accesses": 0,
         "port_scans":              0,
         "privilege_escalations":   0,
+        "log_cleared":             0,
+        "recon_attempts":          0,
         "total_events":            0,
+        "usernames":               set(),
+        "first_seen":              None,
+        "last_seen":               None,
     })
 
     for ev in events:
@@ -140,34 +301,70 @@ def aggregate_by_ip(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         a["sensitive_file_accesses"] += ev.get("sensitive_file_access", 0)
         a["port_scans"]              += ev.get("port_scan", 0)
         a["privilege_escalations"]   += ev.get("privilege_escalation", 0)
+        a["log_cleared"]             += ev.get("log_cleared", 0)
+        a["recon_attempts"]          += ev.get("recon", 0)
         a["total_events"]            += 1
 
-    return dict(agg)
+        if ev.get("username"):
+            a["usernames"].add(ev["username"])
+
+        ts = ev.get("log_timestamp")
+        if ts:
+            if a["first_seen"] is None:
+                a["first_seen"] = ts
+            a["last_seen"] = ts
+
+    # Convert sets to sorted lists for JSON serialisation
+    result = {}
+    for ip, data in agg.items():
+        d = dict(data)
+        d["usernames"] = sorted(d["usernames"])
+        result[ip] = d
+
+    return result
 
 
-# ── Log score from aggregated features ───────────────────────────────────────
+# ── Attack intensity score → request_count for process_event() ───────────────
 
-_MAX_RAW = 300.0  # theoretical max for normalization
-
-def score_from_features(features: Dict[str, int]) -> float:
+def compute_request_count(features: Dict[str, Any]) -> int:
     """
-    Compute a 0–100 log_score from aggregated feature counts.
+    Derive a meaningful request_count from log features.
+    This is passed to process_event() so the risk engine sees realistic load.
 
-    Weights chosen to reflect severity:
-        failed_logins           × 10
-        sudo_attempts           × 20
-        suspicious_commands     × 25
-        sensitive_file_accesses × 15
-        port_scans              × 15
-        privilege_escalations   × 30
+    Formula reflects attack intensity:
+      failed_logins × 5  (brute force = many requests)
+      sudo_attempts × 3
+      suspicious_commands × 4
+      port_scans × 10    (scanners generate many packets)
+      privilege_escalations × 6
+      total_events × 1   (baseline)
     """
+    raw = (
+        features.get("failed_logins",           0) * 5  +
+        features.get("sudo_attempts",           0) * 3  +
+        features.get("suspicious_commands",     0) * 4  +
+        features.get("port_scans",              0) * 10 +
+        features.get("privilege_escalations",   0) * 6  +
+        features.get("total_events",            0) * 1
+    )
+    return max(raw, 1)
+
+
+# ── Log score from aggregated features (used standalone if needed) ────────────
+
+_MAX_RAW = 500.0
+
+def score_from_features(features: Dict[str, Any]) -> float:
+    """Compute a 0–100 log_score from aggregated feature counts."""
     raw = (
         features.get("failed_logins",           0) * 10 +
         features.get("sudo_attempts",           0) * 20 +
         features.get("suspicious_commands",     0) * 25 +
         features.get("sensitive_file_accesses", 0) * 15 +
         features.get("port_scans",              0) * 15 +
-        features.get("privilege_escalations",   0) * 30
+        features.get("privilege_escalations",   0) * 30 +
+        features.get("log_cleared",             0) * 40 +
+        features.get("recon_attempts",          0) * 10
     )
     return round(min(raw / _MAX_RAW * 100.0, 100.0), 2)
 
@@ -179,7 +376,7 @@ def classify_log_score(score: float) -> str:
     return "NORMAL"
 
 
-def build_reason(features: Dict[str, int]) -> str:
+def build_reason(features: Dict[str, Any]) -> str:
     parts = []
     if features.get("failed_logins", 0):
         parts.append(f"failed_logins={features['failed_logins']}")
@@ -193,23 +390,19 @@ def build_reason(features: Dict[str, int]) -> str:
         parts.append(f"port_scans={features['port_scans']}")
     if features.get("privilege_escalations", 0):
         parts.append(f"priv_esc={features['privilege_escalations']}")
+    if features.get("log_cleared", 0):
+        parts.append(f"log_cleared={features['log_cleared']}")
+    if features.get("recon_attempts", 0):
+        parts.append(f"recon={features['recon_attempts']}")
     return ", ".join(parts) if parts else "no_signals_detected"
 
 
-# ── Full dataset analysis pipeline ───────────────────────────────────────────
+# ── Full dataset analysis pipeline (standalone, no process_event) ─────────────
 
 def analyze_log_dataset(lines: List[str]) -> Dict[str, Any]:
     """
-    Full pipeline: parse → aggregate → score → classify per IP.
-
-    Args:
-        lines: Raw log lines from any Linux log file.
-
-    Returns:
-        {
-          "summary": { total_lines, valid_events, unique_ips, anomalies },
-          "results": [ { ip, risk_score, status, actions, reason, features } ]
-        }
+    Standalone pipeline: parse → aggregate → score → classify per IP.
+    Used when process_event() is not available (e.g. unit tests).
     """
     events, total, valid = parse_lines(lines)
     by_ip = aggregate_by_ip(events)
@@ -222,7 +415,6 @@ def analyze_log_dataset(lines: List[str]) -> Dict[str, Any]:
         status = classify_log_score(score)
         reason = build_reason(features)
 
-        # Derive actions from status (mirrors response_engine logic)
         actions: List[str] = []
         if status == "SUSPICIOUS":
             actions = ["flagged"]
@@ -243,7 +435,6 @@ def analyze_log_dataset(lines: List[str]) -> Dict[str, Any]:
             "features":   features,
         })
 
-    # Sort by risk_score descending
     results.sort(key=lambda r: r["risk_score"], reverse=True)
 
     logger.info(

@@ -50,6 +50,95 @@ def _attack_log() -> Dict[str, Any]:
     }
 
 
+# ── Named attack scenarios for Simulate Attack button ────────────────────────
+
+_ATTACK_SCENARIOS = [
+    {
+        "name":        "Brute Force SSH",
+        "src_ip":      None,   # filled at runtime
+        "protocol_type":          "TCP",
+        "login_attempts":         random.randint(18, 25),
+        "failed_logins":          random.randint(15, 20),
+        "unusual_time_access":    1,
+        "ip_reputation_score":    round(random.uniform(0.85, 1.0), 4),
+        "session_duration":       random.randint(1, 5),
+        "network_traffic_volume": random.randint(80000, 200000),
+        "network_packet_size":    random.randint(64, 256),
+        "attack_detected":        1,
+    },
+    {
+        "name":        "Data Exfiltration",
+        "src_ip":      None,
+        "protocol_type":          "TCP",
+        "login_attempts":         random.randint(2, 4),
+        "failed_logins":          random.randint(0, 1),
+        "unusual_time_access":    1,
+        "ip_reputation_score":    round(random.uniform(0.7, 0.95), 4),
+        "session_duration":       random.randint(400, 900),
+        "network_traffic_volume": random.randint(300000, 500000),
+        "network_packet_size":    random.randint(4000, 9000),
+        "attack_detected":        1,
+    },
+    {
+        "name":        "Port Scan / Reconnaissance",
+        "src_ip":      None,
+        "protocol_type":          "ICMP",
+        "login_attempts":         random.randint(1, 3),
+        "failed_logins":          random.randint(0, 2),
+        "unusual_time_access":    1,
+        "ip_reputation_score":    round(random.uniform(0.8, 1.0), 4),
+        "session_duration":       random.randint(1, 3),
+        "network_traffic_volume": random.randint(50000, 150000),
+        "network_packet_size":    random.randint(40, 64),
+        "attack_detected":        1,
+    },
+    {
+        "name":        "Privilege Escalation",
+        "src_ip":      None,
+        "protocol_type":          "TCP",
+        "login_attempts":         random.randint(8, 15),
+        "failed_logins":          random.randint(6, 12),
+        "unusual_time_access":    1,
+        "ip_reputation_score":    round(random.uniform(0.75, 0.95), 4),
+        "session_duration":       random.randint(200, 600),
+        "network_traffic_volume": random.randint(10000, 80000),
+        "network_packet_size":    random.randint(512, 2048),
+        "attack_detected":        1,
+    },
+    {
+        "name":        "Credential Stuffing",
+        "src_ip":      None,
+        "protocol_type":          "HTTP",
+        "login_attempts":         random.randint(20, 25),
+        "failed_logins":          random.randint(18, 24),
+        "unusual_time_access":    0,
+        "ip_reputation_score":    round(random.uniform(0.8, 1.0), 4),
+        "session_duration":       random.randint(1, 10),
+        "network_traffic_volume": random.randint(20000, 100000),
+        "network_packet_size":    random.randint(256, 1024),
+        "attack_detected":        1,
+    },
+]
+
+
+def generate_attack_scenario() -> Dict[str, Any]:
+    """
+    Return a random high-threat attack scenario.
+    Always produces SUSPICIOUS / HIGH_RISK / EXTREME_RISK — never NORMAL.
+    Used by the Simulate Attack button.
+    """
+    import copy
+    scenario = copy.deepcopy(random.choice(_ATTACK_SCENARIOS))
+    # Assign a random attacker IP
+    scenario["src_ip"] = (
+        f"{random.randint(10,220)}."
+        f"{random.randint(1,254)}."
+        f"{random.randint(1,254)}."
+        f"{random.randint(1,254)}"
+    )
+    return scenario
+
+
 def generate_synthetic_logs(n: int = 10000) -> List[Dict[str, Any]]:
     """
     Generate n synthetic network intrusion log records.

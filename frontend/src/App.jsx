@@ -12,17 +12,6 @@ import ThreatHuntPage from './components/ThreatHuntPage'
 const api    = axios.create({ baseURL: 'http://localhost:8000' })
 const ingest = axios.create({ baseURL: 'http://127.0.0.1:8001' })
 
-// Random IP + device generator for live hook simulation
-function randomIngestEvent() {
-  const octet = () => Math.floor(Math.random() * 254) + 1
-  const devices = ['TCP', 'UDP', 'SSH', 'HTTP', 'ICMP', 'FTP', 'SMTP']
-  return {
-    ip:            `${octet()}.${octet()}.${octet()}.${octet()}`,
-    device:        devices[Math.floor(Math.random() * devices.length)],
-    request_count: Math.floor(Math.random() * 300) + 1,
-  }
-}
-
 function StatusDot({ ok, label, showLabel = true }) {
   return (
     <div className="flex items-center gap-3 px-3 py-1">
@@ -65,8 +54,6 @@ export default function App() {
       const r = await api.get('/api/analyze')
       setResult(r.data)
       await fetchGraph()
-      // also push to ingest so WS feed gets the event
-      try { await ingest.post('/ingest', randomIngestEvent()) } catch {}
     } catch {
       setError('Analysis failed. Is the backend running?')
     } finally {
@@ -74,13 +61,30 @@ export default function App() {
     }
   }, [loading, fetchGraph])
 
-  // Live Hook: fire a random ingest event every 1.5s directly to port 8001
-  // This drives the WebSocket stream without touching the dashboard result state
+  // Live Hook: run real attack simulations every 2s and stream to live feed + update left panel
   useEffect(() => {
     if (!autoRefresh) return
     const interval = setInterval(async () => {
-      try { await ingest.post('/ingest', randomIngestEvent()) } catch {}
-    }, 1500)
+      try {
+        const r = await api.post('/api/simulate', { count: 1 })
+        const attackResult = r.data[0]
+        // Update left panel with latest attack
+        setResult(attackResult)
+        // Push to ingest so WS live feed shows it
+        try {
+          await ingest.post('/ingest', {
+            ip: attackResult.features?.src_ip
+              || `${Math.floor(Math.random()*220)+10}.${Math.floor(Math.random()*254)+1}.${Math.floor(Math.random()*254)+1}.${Math.floor(Math.random()*254)+1}`,
+            device:        attackResult.features?.name || attackResult.features?.protocol_type || 'ATTACK',
+            request_count: Math.max(
+              (attackResult.features?.failed_logins || 0) * 5 +
+              (attackResult.features?.login_attempts || 0) * 2,
+              50
+            ),
+          })
+        } catch {}
+      } catch {}
+    }, 2000)
     return () => clearInterval(interval)
   }, [autoRefresh])
 
@@ -89,9 +93,25 @@ export default function App() {
     setError(null)
     try {
       const r = await api.post('/api/simulate', { count: 1 })
-      setResult(r.data[0])
+      const attackResult = r.data[0]
+
+      // Always update the left panel with attack details
+      setResult(attackResult)
       await fetchGraph()
-      try { await ingest.post('/ingest', randomIngestEvent()) } catch {}
+
+      // Push the actual attack event to ingest so live feed shows it too
+      try {
+        await ingest.post('/ingest', {
+          ip: attackResult.features?.src_ip
+            || `${Math.floor(Math.random()*220)+10}.${Math.floor(Math.random()*254)+1}.${Math.floor(Math.random()*254)+1}.${Math.floor(Math.random()*254)+1}`,
+          device:        attackResult.features?.name || attackResult.features?.protocol_type || 'ATTACK',
+          request_count: Math.max(
+            (attackResult.features?.failed_logins || 0) * 5 +
+            (attackResult.features?.login_attempts || 0) * 2,
+            50
+          ),
+        })
+      } catch {}
     } catch {
       setError('Simulation failed. Is the backend running?')
     } finally {
