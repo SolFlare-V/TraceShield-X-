@@ -3,6 +3,7 @@ main.py — FastAPI entry point for the TraceShield ingestion service.
 Real-time anomaly detection with unified risk scoring and Neo4j storage.
 """
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ from ingestion.services.log_parser import (
     ingest_logs_for_ip,
     get_ip_log_summary,
 )
+from ingestion.services.linux_log_parser import analyze_log_dataset
 from ingestion.services.ml_training import (
     train as ml_train,
     evaluate as ml_evaluate,
@@ -79,16 +81,10 @@ def root():
 
 
 @app.post("/ingest", response_model=IngestResponse)
-def ingest(payload: IngestPayload) -> IngestResponse:
+async def ingest(payload: IngestPayload) -> IngestResponse:
     """
     Ingest a single network event and run real-time unified risk scoring.
-
-    Classification:
-        0-30  → NORMAL
-        30-70 → SUSPICIOUS
-        70-100 → HIGH_RISK
-
-    Stores SUSPICIOUS and HIGH_RISK events in Neo4j.
+    Broadcasts result to all connected WebSocket clients.
     """
     try:
         ts = payload.timestamp or datetime.now(timezone.utc).replace(tzinfo=None)
@@ -98,7 +94,7 @@ def ingest(payload: IngestPayload) -> IngestResponse:
             request_count=payload.request_count,
             timestamp=ts,
         )
-        return IngestResponse(
+        response_obj = IngestResponse(
             status=result["status"],
             risk_score=result["risk_score"],
             message=result["message"],
@@ -110,13 +106,65 @@ def ingest(payload: IngestPayload) -> IngestResponse:
             components=result["components"],
             response=result["response"],
         )
+        # Broadcast to WebSocket clients (non-blocking)
+        ws_payload = {
+            "ip":           payload.ip,
+            "device":       payload.device,
+            "request_count": payload.request_count,
+            "status":       result["status"],
+            "risk_score":   result["risk_score"],
+            "actions":      result["response"].get("actions_taken", []),
+            "reason":       result["response"].get("reason", "N/A"),
+            "log_score":    result["components"].get("log_score", 0),
+            "ml_score":     result["components"].get("ml_score", 0),
+            "timestamp":    ts.isoformat(),
+        }
+        await _ws_manager.broadcast(ws_payload)
+        return response_obj
     except Exception as exc:
         logger.error("Ingest error: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.get("/health")
-def health():
+import json
+from typing import List as WsList
+
+# ── WebSocket connection manager ──────────────────────────────────────────────
+
+class ConnectionManager:
+    def __init__(self):
+        self.active: WsList[WebSocket] = []
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self.active.append(ws)
+
+    def disconnect(self, ws: WebSocket):
+        self.active = [c for c in self.active if c != ws]
+
+    async def broadcast(self, data: dict):
+        dead = []
+        for ws in self.active:
+            try:
+                await ws.send_text(json.dumps(data))
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.disconnect(ws)
+
+
+_ws_manager = ConnectionManager()
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for real-time event streaming."""
+    await _ws_manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()   # keep alive
+    except WebSocketDisconnect:
+        _ws_manager.disconnect(websocket)
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
 
 
@@ -147,6 +195,115 @@ def ingest_logs(body: LogIngestRequest):
 def get_log_summary(ip_address: str):
     """Return aggregated log signals for a specific IP."""
     return {"ip": ip_address, "log_summary": get_ip_log_summary(ip_address)}
+
+
+# ── Dataset log analysis endpoint ─────────────────────────────────────────────
+
+class DatasetLogsRequest(BaseModel):
+    log_lines: list[str]
+
+
+@app.post("/dataset/logs")
+async def dataset_logs(body: DatasetLogsRequest):
+    """
+    Analyze a batch of raw Linux log lines from any log format.
+
+    All scoring flows through the unified pipeline:
+      linux_log_parser → aggregate per-IP → process_event() → broadcast WS
+
+    Input:  { "log_lines": ["<raw log line>", ...] }
+    Output: { "summary": {...}, "results": [{ip, risk_score, status, ...}] }
+    """
+    try:
+        if not body.log_lines:
+            raise HTTPException(status_code=400, detail="log_lines must not be empty")
+
+        # Step 1: parse + aggregate per-IP using linux_log_parser
+        from ingestion.services.linux_log_parser import parse_lines, aggregate_by_ip
+        events, total, valid = parse_lines(body.log_lines)
+        by_ip = aggregate_by_ip(events)
+
+        logger.info(
+            "DATASET/LOGS | lines=%d valid=%d unique_ips=%d",
+            total, valid, len(by_ip),
+        )
+
+        results = []
+        anomaly_count = 0
+
+        for ip, features in by_ip.items():
+            # Step 2: seed per-IP log state so risk_engine picks up log signals
+            ingest_logs_for_ip(ip, [
+                ev["raw"] for ev in events if ev.get("ip") == ip
+            ])
+
+            # Step 3: run through the unified pipeline (same as /ingest)
+            ts = datetime.now(timezone.utc).replace(tzinfo=None)
+            result = process_event(
+                ip=ip,
+                device="dataset_log",
+                request_count=max(features.get("total_events", 1), 1),
+                timestamp=ts,
+            )
+
+            status   = result["status"]
+            score    = result["risk_score"]
+            response = result["response"]
+
+            if status != "NORMAL":
+                anomaly_count += 1
+
+            # Step 4: broadcast to WebSocket clients
+            ws_payload = {
+                "ip":            ip,
+                "device":        "dataset_log",
+                "request_count": features.get("total_events", 1),
+                "status":        status,
+                "risk_score":    score,
+                "actions":       response.get("actions_taken", []),
+                "reason":        response.get("reason", "N/A"),
+                "log_score":     result["components"].get("log_score", 0),
+                "ml_score":      result["components"].get("ml_score", 0),
+                "timestamp":     ts.isoformat(),
+            }
+            # Broadcast immediately, then yield to event loop so the WS message
+            # is flushed to clients before processing the next IP (live stream effect)
+            await _ws_manager.broadcast(ws_payload)
+            await asyncio.sleep(0.075)  # 75ms pacing between events
+
+            results.append({
+                "ip":         ip,
+                "risk_score": score,
+                "status":     status,
+                "actions":    response.get("actions_taken", []),
+                "reason":     response.get("reason", "N/A"),
+                "features":   features,
+                "components": result["components"],
+            })
+
+        # Sort by risk_score descending
+        results.sort(key=lambda r: r["risk_score"], reverse=True)
+
+        logger.info(
+            "DATASET/LOGS DONE | ips=%d anomalies=%d",
+            len(by_ip), anomaly_count,
+        )
+
+        return {
+            "summary": {
+                "total_lines":  total,
+                "valid_events": valid,
+                "unique_ips":   len(by_ip),
+                "anomalies":    anomaly_count,
+            },
+            "results": results,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("dataset/logs error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ── ML training endpoints ─────────────────────────────────────────────────────

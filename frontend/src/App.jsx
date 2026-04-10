@@ -3,12 +3,25 @@ import axios from 'axios'
 import RiskCard from './components/RiskCard'
 import AlertFeed from './components/AlertFeed'
 import GraphPanel from './components/GraphPanel'
+import LiveFeed from './components/LiveFeed'
 import HomePage from './components/HomePage'
 import AnalyticsPage from './components/AnalyticsPage'
 import DataLogsPage from './components/DataLogsPage'
 import ThreatHuntPage from './components/ThreatHuntPage'
 
-const api = axios.create({ baseURL: 'http://localhost:8000' })
+const api    = axios.create({ baseURL: 'http://localhost:8000' })
+const ingest = axios.create({ baseURL: 'http://127.0.0.1:8001' })
+
+// Random IP + device generator for live hook simulation
+function randomIngestEvent() {
+  const octet = () => Math.floor(Math.random() * 254) + 1
+  const devices = ['TCP', 'UDP', 'SSH', 'HTTP', 'ICMP', 'FTP', 'SMTP']
+  return {
+    ip:            `${octet()}.${octet()}.${octet()}.${octet()}`,
+    device:        devices[Math.floor(Math.random() * devices.length)],
+    request_count: Math.floor(Math.random() * 300) + 1,
+  }
+}
 
 function StatusDot({ ok, label, showLabel = true }) {
   return (
@@ -52,6 +65,8 @@ export default function App() {
       const r = await api.get('/api/analyze')
       setResult(r.data)
       await fetchGraph()
+      // also push to ingest so WS feed gets the event
+      try { await ingest.post('/ingest', randomIngestEvent()) } catch {}
     } catch {
       setError('Analysis failed. Is the backend running?')
     } finally {
@@ -59,11 +74,15 @@ export default function App() {
     }
   }, [loading, fetchGraph])
 
+  // Live Hook: fire a random ingest event every 1.5s directly to port 8001
+  // This drives the WebSocket stream without touching the dashboard result state
   useEffect(() => {
     if (!autoRefresh) return
-    const interval = setInterval(fetchAnalyze, 5000)
+    const interval = setInterval(async () => {
+      try { await ingest.post('/ingest', randomIngestEvent()) } catch {}
+    }, 1500)
     return () => clearInterval(interval)
-  }, [autoRefresh, fetchAnalyze])
+  }, [autoRefresh])
 
   const simulate = async () => {
     setLoading(true)
@@ -72,6 +91,7 @@ export default function App() {
       const r = await api.post('/api/simulate', { count: 1 })
       setResult(r.data[0])
       await fetchGraph()
+      try { await ingest.post('/ingest', randomIngestEvent()) } catch {}
     } catch {
       setError('Simulation failed. Is the backend running?')
     } finally {
@@ -261,6 +281,9 @@ export default function App() {
                     </div>
                   </div>
                 )}
+
+                {/* Live Event Stream — always visible, themed to match dashboard */}
+                <LiveFeed />
               </>
             )}
 
