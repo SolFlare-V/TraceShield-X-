@@ -1,18 +1,19 @@
 """
 main.py — FastAPI entry point for the TraceShield ingestion service.
-Real-time anomaly detection with Neo4j graph storage.
+Real-time anomaly detection with unified risk scoring and Neo4j storage.
 """
 
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from ingestion.models.schemas import IngestPayload, IngestResponse
-from ingestion.services.anomaly import process_event
-from ingestion.services.ml_engine import get_model
+from ingestion.services.anomaly_detector import process_event
+from ingestion.services.ml_model import get_ml_score
+from ingestion.services.response_engine import get_full_state
 from ingestion.db.neo4j_conn import close_driver
 
 logging.basicConfig(
@@ -24,9 +25,10 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Ingestion service starting up — training ML model...")
-    get_model()   # warm up: trains on 8000 synthetic samples at startup
-    logger.info("ML model ready.")
+    logger.info("Ingestion service starting — warming up ML model...")
+    # Warm up: triggers training on first call
+    get_ml_score(50, datetime.now())
+    logger.info("ML model ready. Service online.")
     yield
     close_driver()
     logger.info("Ingestion service shut down.")
@@ -34,8 +36,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="TraceShield Ingestion API",
-    description="Real-time cybersecurity event ingestion and anomaly detection.",
-    version="1.0.0",
+    description="Real-time cybersecurity event ingestion with unified risk scoring.",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -49,20 +51,23 @@ app.add_middleware(
 
 @app.get("/")
 def root():
-    return {"status": "online", "service": "TraceShield Ingestion API"}
+    return {"status": "online", "service": "TraceShield Ingestion API v2.0"}
 
 
 @app.post("/ingest", response_model=IngestResponse)
 def ingest(payload: IngestPayload) -> IngestResponse:
     """
-    Ingest a single network event and run real-time anomaly detection.
+    Ingest a single network event and run real-time unified risk scoring.
 
-    - Logs every incoming request.
-    - Flags anomaly if request_count > 100.
-    - Stores anomalous events in Neo4j as graph relationships.
+    Classification:
+        0-30  → NORMAL
+        30-70 → SUSPICIOUS
+        70-100 → HIGH_RISK
+
+    Stores SUSPICIOUS and HIGH_RISK events in Neo4j.
     """
     try:
-        ts = payload.timestamp or datetime.utcnow()
+        ts = payload.timestamp or datetime.now(timezone.utc).replace(tzinfo=None)
         result = process_event(
             ip=payload.ip,
             device=payload.device,
@@ -70,14 +75,16 @@ def ingest(payload: IngestPayload) -> IngestResponse:
             timestamp=ts,
         )
         return IngestResponse(
-            status="anomaly" if result["anomaly"] else "ok",
-            anomaly=result["anomaly"],
-            confidence=result["confidence"],
+            status=result["status"],
+            risk_score=result["risk_score"],
             message=result["message"],
             ip=payload.ip,
             device=payload.device,
             request_count=payload.request_count,
             timestamp=ts,
+            graph_stored=result["graph_stored"],
+            components=result["components"],
+            response=result["response"],
         )
     except Exception as exc:
         logger.error("Ingest error: %s", exc)
@@ -87,3 +94,9 @@ def ingest(payload: IngestPayload) -> IngestResponse:
 @app.get("/health")
 def health():
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/blocked")
+def blocked_list():
+    """Return full in-memory response state with timestamps and reasons."""
+    return get_full_state()

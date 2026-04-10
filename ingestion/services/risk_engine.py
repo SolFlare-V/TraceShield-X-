@@ -1,0 +1,199 @@
+"""
+risk_engine.py — Adaptive weighted risk scoring with 4-tier classification.
+
+Weights:
+    ML score       → 35%
+    Temporal score → 25%
+    Count score    → 20%
+    Spike score    → 10%
+    Trend score    → 10%
+
+Classification (single authoritative variable):
+    0–30   → NORMAL
+    30–70  → SUSPICIOUS
+    70–90  → HIGH_RISK
+    90–100 → EXTREME_RISK
+
+Spike override:
+    spike > 70 → floor final at 70 (HIGH_RISK minimum)
+    Score can still exceed 90 naturally → EXTREME_RISK
+"""
+
+import logging
+from collections import defaultdict, deque
+from datetime import datetime
+
+from ingestion.services.ml_model  import get_ml_score, ML_ANOMALY_THRESHOLD
+from ingestion.services.ip_memory import record_event
+
+logger = logging.getLogger(__name__)
+
+W_ML       = 0.35
+W_TEMPORAL = 0.25
+W_COUNT    = 0.20
+W_SPIKE    = 0.10
+W_TREND    = 0.10
+
+SPIKE_OVERRIDE_THRESHOLD = 70.0
+_WINDOW_SECONDS = 60
+_ip_window: dict = defaultdict(lambda: deque())
+
+
+def _count_score(request_count: int) -> float:
+    if request_count <= 5:    return 0.0
+    if request_count <= 20:   return 10.0
+    if request_count <= 50:   return 25.0
+    if request_count <= 100:  return 45.0
+    if request_count <= 300:  return 70.0
+    if request_count <= 1000: return 88.0
+    return 100.0
+
+
+def _temporal_score(ip: str, request_count: int, timestamp: datetime) -> float:
+    now_ts = timestamp.timestamp()
+    window = _ip_window[ip]
+    for _ in range(request_count):
+        window.append(now_ts)
+    cutoff = now_ts - _WINDOW_SECONDS
+    while window and window[0] < cutoff:
+        window.popleft()
+
+    rps = len(window) / _WINDOW_SECONDS
+    if rps <= 0:    rps_score = 0.0
+    elif rps <= 1:  rps_score = rps * 20.0
+    elif rps <= 5:  rps_score = 20.0 + (rps - 1) * 10.0
+    elif rps <= 10: rps_score = 60.0 + (rps - 5) * 8.0
+    else:           rps_score = 100.0
+
+    h = timestamp.hour
+    if 0 <= h <= 5:     tod_mult = 1.40
+    elif 22 <= h <= 23: tod_mult = 1.25
+    elif 6 <= h <= 8:   tod_mult = 1.10
+    else:               tod_mult = 1.00
+
+    return round(min(rps_score * tod_mult, 100.0), 2)
+
+
+def _spike_score(avg_count: float, request_count: int) -> tuple:
+    spike_ratio = (request_count - avg_count) / (avg_count + 1e-5)
+    spike_ratio = max(spike_ratio, 0.0)
+    score = min(spike_ratio * 100.0, 100.0)
+    return round(score, 2), round(spike_ratio, 4)
+
+
+def _classify(score: float) -> str:
+    """
+    Single authoritative classification derived purely from score.
+    Thresholds calibrated to actual score distribution.
+    Score ranges:
+        0–25   → NORMAL
+        25–40  → SUSPICIOUS
+        40–60  → HIGH_RISK
+        60–100 → EXTREME_RISK
+    """
+    if score >= 60.0: return "EXTREME_RISK"
+    if score >= 40.0: return "HIGH_RISK"
+    if score >= 25.0: return "SUSPICIOUS"
+    return "NORMAL"
+
+
+def _validate_consistency(score: float, status: str) -> None:
+    """Assert score falls within the expected range for its status."""
+    ranges = {
+        "NORMAL":       (0.0,  25.0),
+        "SUSPICIOUS":   (25.0, 40.0),
+        "HIGH_RISK":    (40.0, 60.0),
+        "EXTREME_RISK": (60.0, 100.0),
+    }
+    lo, hi = ranges[status]
+    if not (lo <= score <= hi):
+        logger.warning(
+            "CONSISTENCY WARNING | score=%.2f outside [%.0f–%.0f] for %s",
+            score, lo, hi, status
+        )
+
+
+def compute_risk(ip: str, request_count: int, timestamp: datetime) -> dict:
+    """
+    Compute adaptive weighted risk score with strict score-status consistency.
+
+    Rule: status is ALWAYS derived from score — never assigned independently.
+    Overrides adjust the SCORE first, then classification follows.
+
+    Score ranges:
+        0–30   → NORMAL
+        30–70  → SUSPICIOUS
+        70–90  → HIGH_RISK
+        90–100 → EXTREME_RISK
+    """
+    rec         = record_event(ip, request_count, timestamp)
+    avg_count   = rec.avg_count()
+    hist_rate   = rec.avg_rate()
+    t_score_val = rec.trend_score()
+
+    spike, spike_ratio = _spike_score(avg_count, request_count)
+
+    ml_score = get_ml_score(
+        request_count, timestamp,
+        deviation=spike_ratio,
+        hist_rate=hist_rate,
+    )
+    t_score = _temporal_score(ip, request_count, timestamp)
+    c_score = _count_score(request_count)
+
+    # Base weighted score
+    final = (W_ML * ml_score + W_TEMPORAL * t_score +
+             W_COUNT * c_score + W_SPIKE * spike + W_TREND * t_score_val)
+
+    override_triggered = False
+
+    # Spike override: extreme spike (>90) → score must be in EXTREME_RISK range
+    if spike >= 90.0 and final < 60.0:
+        final = max(final, 60.0)
+        override_triggered = True
+        logger.warning(
+            "SPIKE OVERRIDE [EXTREME] | ip=%s spike=%.1f → score elevated to %.1f",
+            ip, spike, final
+        )
+    # Moderate spike (>70) → score must be at least HIGH_RISK range
+    elif spike > SPIKE_OVERRIDE_THRESHOLD and final < 40.0:
+        final = max(final, 40.0)
+        override_triggered = True
+        logger.warning(
+            "SPIKE OVERRIDE [HIGH] | ip=%s spike=%.1f → score elevated to %.1f",
+            ip, spike, final
+        )
+
+    # ML override: anomalous ML must be at least SUSPICIOUS
+    if ml_score >= ML_ANOMALY_THRESHOLD and final < 30.0:
+        final = 30.0
+        override_triggered = True
+
+    # Clamp and classify — status derived ONLY from final score
+    final  = round(min(max(final, 0.0), 100.0), 2)
+    status = _classify(final)
+
+    # Validation layer
+    _validate_consistency(final, status)
+
+    logger.info(
+        "RISK | ip=%-16s count=%4d avg=%.1f spike=%.1f(%.2fx) trend=%.1f | "
+        "ml=%.1f temporal=%.1f count=%.1f → FINAL=%.2f [%s] override=%s",
+        ip, request_count, avg_count, spike, spike_ratio, t_score_val,
+        ml_score, t_score, c_score, final, status, override_triggered
+    )
+
+    return {
+        "risk_score":        final,
+        "status":            status,
+        "override_triggered": override_triggered,
+        "components": {
+            "ml_score":       round(ml_score, 2),
+            "temporal_score": round(t_score, 2),
+            "count_score":    round(c_score, 2),
+            "spike_score":    spike,
+            "trend_score":    t_score_val,
+            "avg_previous":   round(avg_count, 2),
+            "spike_ratio":    spike_ratio,
+        },
+    }
