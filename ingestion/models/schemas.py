@@ -20,6 +20,7 @@ class IngestPayload(BaseModel):
 class IngestResponse(BaseModel):
     status: str
     anomaly: bool
+    confidence: float
     message: str
     ip: str
     device: str

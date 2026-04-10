@@ -3,3 +3,5 @@ uvicorn[standard]
 neo4j
 python-dotenv
 pydantic
+scikit-learn
+numpy
