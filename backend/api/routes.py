@@ -53,7 +53,8 @@ def _run_pipeline(request: Request, row: Dict[str, Any]) -> Dict[str, Any]:
     risk_result = calculate_risk(anomaly_score, detection_result, row, anomaly)
 
     # Graph update
-    graph_updated = build_graph_from_detection(anomaly, row)
+    flags_list = detection_result.get("types", [])
+    graph_updated = build_graph_from_detection(anomaly, row, flags_list)
 
     # Summary
     summary  = generate_summary(risk_result, detection_result, anomaly)

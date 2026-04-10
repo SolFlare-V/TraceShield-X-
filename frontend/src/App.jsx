@@ -130,6 +130,7 @@ export default function App() {
           />
           <div className="lg:col-span-2">
             <GraphPanel nodes={graph.nodes} edges={graph.edges}
+              features={result?.features}
               onCleared={() => setGraph({ nodes: [], edges: [] })} />
           </div>
         </div>
