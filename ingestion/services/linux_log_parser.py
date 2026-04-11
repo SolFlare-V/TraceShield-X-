@@ -145,15 +145,29 @@ _RE_PORT_SCAN = re.compile(
 )
 
 _RE_PRIVILEGE_ESC = re.compile(
-    r'su\s*:\s*FAILED'
+    # Failed sudo attempts
+    r'sudo.*incorrect password'
+    r'|sudo.*3 incorrect password'
+    r'|sudo.*authentication failure'
+    # su failures
+    r'|su\s*:\s*FAILED'
     r'|su\s*:\s*pam_authenticate'
+    # Spawning a root shell via sudo — the key attack pattern
+    r'|sudo\s*:.*COMMAND\s*=\s*/bin/bash'
+    r'|sudo\s*:.*COMMAND\s*=\s*/bin/sh'
+    r'|sudo\s*:.*COMMAND\s*=\s*/usr/bin/bash'
+    r'|sudo\s*:.*COMMAND\s*=\s*/usr/bin/python'
+    r'|sudo\s*:.*COMMAND\s*=\s*/usr/bin/perl'
+    # pam session opened as root (escalation confirmed)
+    r'|pam_unix.*sudo.*session.*opened for user root'
+    r'|sudo.*session opened for user root'
+    r'|pam_unix\(sudo:session\).*session opened for user root'
+    # Kernel/audit privilege escalation
     r'|pkexec'
     r'|polkit'
     r'|CVE-\d{4}-\d+'
     r'|type=USER_AUTH.*res=failed'
-    r'|type=SYSCALL.*comm="su"'
-    r'|sudo.*incorrect password'
-    r'|sudo.*3 incorrect password',
+    r'|type=SYSCALL.*comm="su"',
     re.IGNORECASE,
 )
 
@@ -181,7 +195,31 @@ _RE_RECON = re.compile(
     re.IGNORECASE,
 )
 
-# ── Per-line feature extraction ───────────────────────────────────────────────
+# ── Sudo actor extraction (username before the colon in sudo lines) ───────────
+
+_RE_SUDO_ACTOR = re.compile(
+    r'sudo\s*:\s*([a-zA-Z0-9_\-\.]+)\s*:',
+    re.IGNORECASE,
+)
+
+_RE_PAM_ACTOR = re.compile(
+    r'session opened for user root by ([a-zA-Z0-9_\-\.]+)\(',
+    re.IGNORECASE,
+)
+
+def _extract_sudo_actor(line: str) -> Optional[str]:
+    """Extract the acting username from a sudo log line."""
+    m = _RE_SUDO_ACTOR.search(line)
+    if m:
+        actor = m.group(1)
+        if actor.lower() not in ('pam_unix', 'pam', 'session', 'root'):
+            return actor
+    m = _RE_PAM_ACTOR.search(line)
+    if m:
+        return m.group(1)
+    return None
+
+
 
 def _extract_timestamp(line: str) -> Optional[str]:
     """Try to extract a timestamp string from a log line."""
@@ -229,6 +267,7 @@ def parse_line(line: str) -> Optional[Dict[str, Any]]:
         return {
             "ip":                   ip,
             "username":             _extract_username(line),
+            "sudo_actor":           _extract_sudo_actor(line),
             "log_timestamp":        _extract_timestamp(line),
             "failed_login":         1 if _RE_FAILED_LOGIN.search(line)    else 0,
             "successful_login":     1 if _RE_SUCCESS_LOGIN.search(line)   else 0,
@@ -337,13 +376,13 @@ def compute_request_count(features: Dict[str, Any]) -> int:
     Capped at 500 to avoid overwhelming the temporal scorer.
     """
     raw = (
-        features.get("failed_logins",           0) * 8  +  # brute force = many requests
+        features.get("failed_logins",           0) * 8  +
         features.get("sudo_attempts",           0) * 4  +
         features.get("suspicious_commands",     0) * 6  +
-        features.get("port_scans",              0) * 15 +  # scanners = very high volume
-        features.get("privilege_escalations",   0) * 8  +
+        features.get("port_scans",              0) * 15 +
+        features.get("privilege_escalations",   0) * 12 +  # raised — root shell = high intensity
         features.get("sensitive_file_accesses", 0) * 5  +
-        features.get("log_cleared",             0) * 10 +  # covering tracks = extreme
+        features.get("log_cleared",             0) * 10 +
         features.get("total_events",            0) * 1
     )
     return min(max(raw, 1), 500)
@@ -357,15 +396,28 @@ def score_from_features(features: Dict[str, Any]) -> float:
     """Compute a 0–100 log_score from aggregated feature counts."""
     raw = (
         features.get("failed_logins",           0) * 10 +
-        features.get("sudo_attempts",           0) * 20 +
+        features.get("sudo_attempts",           0) * 15 +
         features.get("suspicious_commands",     0) * 25 +
         features.get("sensitive_file_accesses", 0) * 15 +
         features.get("port_scans",              0) * 15 +
-        features.get("privilege_escalations",   0) * 30 +
+        features.get("privilege_escalations",   0) * 40 +
         features.get("log_cleared",             0) * 40 +
         features.get("recon_attempts",          0) * 10
     )
     return round(min(raw / _MAX_RAW * 100.0, 100.0), 2)
+
+
+def score_from_features_priv_esc(features: Dict[str, Any]) -> float:
+    """
+    Scoring for privilege escalation analysis — no network signals needed.
+    Each priv-esc = 35pts, sudo = 10pts, failed = 8pts. Cap at 100.
+    """
+    raw = (
+        features.get("privilege_escalations", 0) * 35 +
+        features.get("sudo_attempts",         0) * 10 +
+        features.get("failed_logins",         0) * 8
+    )
+    return round(min(raw, 100.0), 2)
 
 
 def classify_log_score(score: float) -> str:
@@ -449,4 +501,154 @@ def analyze_log_dataset(lines: List[str]) -> Dict[str, Any]:
             "anomalies":    anomaly_count,
         },
         "results": results,
+    }
+
+
+# ── Per-user aggregation (for local logs with no IP) ─────────────────────────
+
+def aggregate_by_user(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """
+    Group parsed events by sudo_actor/username for local logs that have no IP.
+    Returns dict: username → aggregated feature counts + attack lines
+    """
+    agg: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
+        "failed_logins":           0,
+        "successful_logins":       0,
+        "sudo_attempts":           0,
+        "suspicious_commands":     0,
+        "sensitive_file_accesses": 0,
+        "port_scans":              0,
+        "privilege_escalations":   0,
+        "log_cleared":             0,
+        "recon_attempts":          0,
+        "total_events":            0,
+        "attack_lines":            [],   # raw lines that triggered priv-esc
+        "sudo_lines":              [],   # all sudo lines
+        "timestamps":              [],
+    })
+
+    for ev in events:
+        # Use sudo_actor first, fall back to username
+        actor = ev.get("sudo_actor") or ev.get("username")
+        if not actor or actor.lower() in ("root", "none", "system"):
+            actor = "unknown_actor"
+
+        a = agg[actor]
+        a["failed_logins"]           += ev.get("failed_login", 0)
+        a["successful_logins"]       += ev.get("successful_login", 0)
+        a["sudo_attempts"]           += ev.get("sudo_attempt", 0)
+        a["suspicious_commands"]     += ev.get("suspicious_command", 0)
+        a["sensitive_file_accesses"] += ev.get("sensitive_file_access", 0)
+        a["port_scans"]              += ev.get("port_scan", 0)
+        a["privilege_escalations"]   += ev.get("privilege_escalation", 0)
+        a["log_cleared"]             += ev.get("log_cleared", 0)
+        a["recon_attempts"]          += ev.get("recon", 0)
+        a["total_events"]            += 1
+
+        if ev.get("privilege_escalation"):
+            a["attack_lines"].append(ev["raw"])
+        if ev.get("sudo_attempt"):
+            a["sudo_lines"].append(ev["raw"])
+        if ev.get("log_timestamp"):
+            a["timestamps"].append(ev["log_timestamp"])
+
+    result = {}
+    for actor, data in agg.items():
+        d = dict(data)
+        d["is_unknown"] = (actor == "unknown_actor")
+        result[actor] = d
+    return result
+
+
+def analyze_privilege_escalation(lines: List[str]) -> Dict[str, Any]:
+    """
+    Dedicated privilege escalation analysis pipeline.
+    Groups by username/actor (not IP) since local logs have no IP.
+    Returns per-user attack breakdown with exact attack lines and timestamps.
+    """
+    events, total, valid = parse_lines(lines)
+
+    # Per-line detections
+    priv_esc_events = [e for e in events if e.get("privilege_escalation")]
+    sudo_events     = [e for e in events if e.get("sudo_attempt")]
+
+    # Per-user aggregation
+    by_user = aggregate_by_user(events)
+
+    results = []
+    attack_count = 0
+
+    for actor, features in by_user.items():
+        if features.get("is_unknown") and features["privilege_escalations"] == 0:
+            continue
+
+        score  = score_from_features_priv_esc(features)
+        status = classify_log_score(score)
+        reason = build_reason(features)
+
+        is_attack = features["privilege_escalations"] > 0
+        if is_attack:
+            attack_count += 1
+
+        # Classify attack type per actor
+        attack_types = []
+        for line in features.get("attack_lines", []):
+            if "/bin/bash" in line or "/bin/sh" in line:
+                attack_types.append("ROOT_SHELL_SPAWN")
+            elif "session opened for user root" in line.lower():
+                attack_types.append("ROOT_SESSION_OPENED")
+            elif "incorrect password" in line.lower():
+                attack_types.append("FAILED_SUDO_ATTEMPT")
+            else:
+                attack_types.append("PRIVILEGE_ESCALATION")
+
+        results.append({
+            "actor":               actor,
+            "risk_score":          score,
+            "status":              status,
+            "reason":              reason,
+            "sudo_attempts":       features["sudo_attempts"],
+            "privilege_escalations": features["privilege_escalations"],
+            "attack_types":        list(set(attack_types)),
+            "attack_lines":        features.get("attack_lines", []),
+            "sudo_lines":          features.get("sudo_lines", []),
+            "timestamps":          features.get("timestamps", []),
+            "total_events":        features["total_events"],
+        })
+
+    results.sort(key=lambda r: r["risk_score"], reverse=True)
+
+    # Also build a flat list of all attack events with line-level detail
+    attack_events = []
+    for e in priv_esc_events:
+        actor = e.get("sudo_actor") or e.get("username") or "unknown"
+        ts    = e.get("log_timestamp", "")
+        line  = e["raw"]
+        atype = "ROOT_SHELL_SPAWN" if "/bin/bash" in line or "/bin/sh" in line \
+                else "ROOT_SESSION_OPENED" if "session opened for user root" in line.lower() \
+                else "FAILED_SUDO_ATTEMPT" if "incorrect password" in line.lower() \
+                else "PRIVILEGE_ESCALATION"
+        attack_events.append({
+            "actor":      actor,
+            "timestamp":  ts,
+            "type":       atype,
+            "raw":        line,
+        })
+
+    logger.info(
+        "PRIV_ESC ANALYSIS | lines=%d valid=%d priv_esc_events=%d actors=%d attacks=%d",
+        total, valid, len(priv_esc_events), len(by_user), attack_count,
+    )
+
+    return {
+        "summary": {
+            "total_lines":       total,
+            "valid_events":      valid,
+            "priv_esc_events":   len(priv_esc_events),
+            "sudo_events":       len(sudo_events),
+            "unique_actors":     len(by_user),
+            "actors_attacked":   attack_count,
+        },
+        "attack_events":  attack_events,   # flat list, one per detected line
+        "actor_results":  results,         # per-actor aggregated breakdown
     }

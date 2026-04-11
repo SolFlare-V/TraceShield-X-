@@ -21,7 +21,7 @@ from ingestion.services.log_parser import (
     ingest_logs_for_ip,
     get_ip_log_summary,
 )
-from ingestion.services.linux_log_parser import analyze_log_dataset
+from ingestion.services.linux_log_parser import analyze_log_dataset, analyze_privilege_escalation
 from ingestion.services.ml_training import (
     train as ml_train,
     evaluate as ml_evaluate,
@@ -219,8 +219,32 @@ class DatasetLogsRequest(BaseModel):
     log_lines: list[str]
 
 
-@app.post("/dataset/logs")
-async def dataset_logs(body: DatasetLogsRequest):
+@app.post("/analyze/priv-esc")
+async def analyze_priv_esc(body: DatasetLogsRequest):
+    """
+    Dedicated privilege escalation analysis endpoint.
+    Accepts raw log lines (no IP required) and returns per-actor breakdown
+    with exact attack lines, timestamps, and attack type classification.
+    """
+    try:
+        if not body.log_lines:
+            raise HTTPException(status_code=400, detail="log_lines must not be empty")
+        result = analyze_privilege_escalation(body.log_lines)
+        logger.info(
+            "PRIV_ESC | lines=%d priv_esc_events=%d actors_attacked=%d",
+            result["summary"]["total_lines"],
+            result["summary"]["priv_esc_events"],
+            result["summary"]["actors_attacked"],
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("analyze/priv-esc error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+
     """
     Analyze a batch of raw Linux log lines from any log format.
 
