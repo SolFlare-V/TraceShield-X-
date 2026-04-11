@@ -245,11 +245,16 @@ class SimulateRequest(BaseModel):
 
 @router.post("/simulate")
 def simulate(request: Request, body: SimulateRequest) -> List[Dict[str, Any]]:
-    """Generate attack scenarios and delegate each to port 8001."""
+    """Sample attack rows from the real dataset and delegate each to port 8001."""
     count = max(1, min(body.count, 50))
     try:
-        logs    = [generate_attack_scenario() for _ in range(count)]
-        results = [_delegate_to_ingest(log) for log in logs]
+        df = request.app.state.df
+        # Only sample from attack rows (attack_detected == 1)
+        attack_df = df[df.get("attack_detected", df.get("privilege_escalation", 0)) == 1] if "attack_detected" in df.columns else df
+        if len(attack_df) == 0:
+            attack_df = df
+        rows = [get_sample_row(attack_df) for _ in range(count)]
+        results = [_delegate_to_ingest(row) for row in rows]
         return results
     except HTTPException:
         raise
@@ -292,9 +297,10 @@ def status(request: Request) -> Dict[str, Any]:
 
 @router.get("/analytics")
 def analytics(request: Request) -> Dict[str, Any]:
-    """Run 50 synthetic logs through port 8001 and aggregate pattern data."""
+    """Run all 70 dataset rows through port 8001 and aggregate pattern data."""
     try:
-        logs    = generate_synthetic_logs(50)
+        df   = request.app.state.df
+        logs = df.to_dict(orient="records")
         results = [_delegate_to_ingest(log) for log in logs]
 
         flag_counts: Dict[str, int] = {}
@@ -312,8 +318,42 @@ def analytics(request: Request) -> Dict[str, Any]:
         for i in range(0, len(results), 10):
             chunk     = results[i:i+10]
             a_count   = sum(1 for r in chunk if r.get("anomaly"))
-            avg_score = round(sum(r.get("anomaly_score", 0) for r in chunk) / len(chunk), 4)
+            avg_score = round(sum(r.get("anomaly_score", 0) for r in chunk) / max(len(chunk),1), 4)
             buckets.append({"bucket": i // 10, "anomalies": a_count, "avg_score": avg_score})
+
+        proto_counts: Dict[str, int] = {}
+        for log in logs:
+            p = log.get("protocol_type", "UNKNOWN")
+            proto_counts[p] = proto_counts.get(p, 0) + 1
+
+        multi_flag = [
+            {
+                "flags":         r.get("flags", []),
+                "risk_score":    r.get("risk_score", 0),
+                "anomaly_score": r.get("anomaly_score", 0),
+                "features": {k: r.get("features", {}).get(k) for k in [
+                    "failed_logins", "login_attempts", "session_duration",
+                    "ip_reputation_score", "unusual_time_access",
+                    "network_traffic_volume", "protocol_type",
+                ]},
+            }
+            for r in results if len(r.get("flags", [])) >= 1
+        ][:15]
+
+        return {
+            "total_logs":    len(results),
+            "anomaly_count": sum(1 for r in results if r.get("anomaly")),
+            "flag_counts":   flag_counts,
+            "risk_dist":     risk_dist,
+            "buckets":       buckets,
+            "proto_counts":  proto_counts,
+            "multi_flag":    multi_flag,
+            "rows":          results,   # full rows for frontend IP table
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
         proto_counts: Dict[str, int] = {}
         for log in logs:
@@ -351,61 +391,84 @@ def analytics(request: Request) -> Dict[str, Any]:
 
 @router.get("/threat-scan")
 def threat_scan(request: Request) -> Dict[str, Any]:
-    """Run 30 attack scenarios via port 8001, return structured threat report."""
+    """Build forensic report from real attack rows in the dataset."""
     try:
-        logs    = [generate_attack_scenario() for _ in range(30)]
-        results = [_delegate_to_ingest(log) for log in logs]
+        df = request.app.state.df
+        # Get all attack rows
+        if "attack_detected" in df.columns:
+            attack_df = df[df["attack_detected"] == 1]
+        else:
+            attack_df = df
+        if len(attack_df) == 0:
+            attack_df = df
+
+        # Process all attack rows through ingestion
+        attack_rows = attack_df.to_dict(orient="records")
+        results = [_delegate_to_ingest(row) for row in attack_rows]
         worst   = max(results, key=lambda r: r.get("risk_score", 0))
         features = worst.get("features", {})
 
-        def rand_ip():
-            return (f"{random.randint(10,220)}.{random.randint(1,254)}"
-                    f".{random.randint(1,254)}.{random.randint(1,254)}")
+        # Use real attacker identity from dataset
+        attacker_ip       = features.get("src_ip") or "10.0.1.55"
+        attacker_username = features.get("actor") or "ubuntu"
+        now = datetime.datetime.utcnow()
+
         def rand_mac():
             return ":".join(f"{random.randint(0,255):02X}" for _ in range(6))
 
-        attacker_ip       = rand_ip()
-        attacker_username = random.choice(["root","admin","ubuntu","deploy","svc_backup"])
-        now = datetime.datetime.utcnow()
+        # Build timeline from real attack rows sorted by timestamp
+        sorted_attacks = sorted(attack_rows, key=lambda r: r.get("log_timestamp",""))
+        events = []
+        for i, row in enumerate(sorted_attacks[:8]):
+            ts_str = row.get("log_timestamp", "")
+            raw    = row.get("raw_log", "")
+            actor  = row.get("actor", "unknown")
+            name   = row.get("name", "Attack")
+            priv   = row.get("privilege_escalation", 0)
+            sudo   = row.get("sudo_attempt", 0)
 
-        flag_event_map = {
-            "BRUTE_FORCE": {
-                "source": "auth.log",
-                "description": f"Brute-force SSH — {features.get('failed_logins','?')} failed attempts from {attacker_ip}",
-                "evidence": f"sshd[{random.randint(1000,9999)}]: Failed password for {attacker_username} from {attacker_ip}",
-            },
-            "LOW_REPUTATION_IP": {
-                "source": "fail2ban.log",
-                "description": f"Low-reputation IP {attacker_ip} (score {round(features.get('ip_reputation_score',0),3)})",
-                "evidence": f"fail2ban.actions: Ban {attacker_ip} — score below threshold",
-            },
-            "ODD_ACCESS_TIME": {
-                "source": "auth.log",
-                "description": "Authentication at unusual hour",
-                "evidence": f"pam_unix: auth failure; user={attacker_username} rhost={attacker_ip}",
-            },
-            "LONG_SESSION": {
-                "source": "syslog",
-                "description": f"Long session: {features.get('session_duration','?')}s",
-                "evidence": f"systemd: Session for {attacker_username} active {features.get('session_duration','?')}s",
-            },
-            "DATA_EXFILTRATION": {
-                "source": "netflow",
-                "description": f"Large outbound transfer: {features.get('network_traffic_volume','?')} bytes",
-                "evidence": f"netflow: {attacker_ip}:443 -> external — possible exfiltration",
-            },
-        }
+            if priv and "COMMAND=/bin/bash" in raw:
+                source = "auth.log"
+                desc   = f"ROOT SHELL SPAWN — {actor} escalated to root via /bin/bash"
+                evid   = raw
+            elif priv and "session opened for user root" in raw.lower():
+                source = "auth.log"
+                desc   = f"ROOT SESSION OPENED — {actor} obtained root session"
+                evid   = raw
+            elif priv and "incorrect password" in raw.lower():
+                source = "auth.log"
+                desc   = f"FAILED SUDO ATTEMPT — {actor} tried to escalate (denied)"
+                evid   = raw
+            elif sudo:
+                source = "auth.log"
+                desc   = f"Sudo command executed by {actor}"
+                evid   = raw
+            else:
+                source = "syslog"
+                desc   = name
+                evid   = raw[:120] if raw else "—"
 
-        events = [{
-            "time": (now - datetime.timedelta(minutes=45)).strftime("%Y-%m-%d %H:%M:%S"),
-            "source": "kern.log",
-            "description": f"Port scan from {attacker_ip} — {random.randint(200,800)} ports probed",
-            "evidence": f"kernel: [UFW BLOCK] IN=eth0 SRC={attacker_ip} PROTO=TCP",
-        }]
-        for i, flag in enumerate(worst.get("flags", [])):
-            if flag in flag_event_map:
-                t = (now - datetime.timedelta(minutes=30 - i*7)).strftime("%Y-%m-%d %H:%M:%S")
-                events.append({"time": t, **flag_event_map[flag]})
+            events.append({
+                "time":        ts_str,
+                "source":      source,
+                "description": desc,
+                "evidence":    evid,
+            })
+
+        # Identify unique attackers from attack rows
+        attackers = {}
+        for row in attack_rows:
+            actor = row.get("actor","unknown")
+            ip    = row.get("src_ip","")
+            if actor not in attackers:
+                attackers[actor] = {"ip": ip, "count": 0, "types": set()}
+            attackers[actor]["count"] += 1
+            attackers[actor]["types"].add(row.get("name","Attack"))
+
+        attacker_summary = [
+            {"actor": a, "ip": v["ip"], "count": v["count"], "types": list(v["types"])}
+            for a, v in sorted(attackers.items(), key=lambda x: -x[1]["count"])
+        ]
 
         flags_readable = worst.get("readable_flags", worst.get("flags", []))
         return {
@@ -413,32 +476,33 @@ def threat_scan(request: Request) -> Dict[str, Any]:
             "incidentDate":     now.strftime("%Y-%m-%d"),
             "incidentTime":     now.strftime("%H:%M"),
             "analystName":      "TraceShield X AutoAnalyst",
-            "systemAffected":   "traceshield-node-01",
+            "systemAffected":   "ubuntu-server",
             "severity":         worst.get("risk_level", "HIGH"),
             "attackerIp":       attacker_ip,
             "attackerUsername": attacker_username,
             "attackerMac":      rand_mac(),
-            "attackerOs":       random.choice(["Kali Linux 2024.1","Ubuntu 22.04 (modified)","Unknown/Spoofed"]),
-            "attackerLocation": random.choice([
-                "Amsterdam, NL — AS14061 DigitalOcean",
-                "Frankfurt, DE — AS16276 OVH SAS",
-                "Moscow, RU — AS8359 MTS PJSC",
-            ]),
+            "attackerOs":       "Ubuntu 22.04 LTS (compromised)",
+            "attackerLocation": "Internal Network — ubuntu-server",
             "events":           events,
+            "attackers":        attacker_summary,
+            "totalAttackEvents": len(attack_rows),
             "summary": (
-                f"TraceShield detected a {worst.get('risk_level','HIGH')}-severity incident from {attacker_ip}. "
+                f"TraceShield detected {len(attack_rows)} privilege escalation events across "
+                f"{len(attackers)} actors. Worst actor: {attacker_username} ({attacker_ip}). "
                 f"Risk score: {worst.get('risk_score',0):.2f}/100. "
-                f"Triggered: {', '.join(flags_readable) if flags_readable else 'Behavioral anomaly'}."
+                f"Triggered: {', '.join(flags_readable) if flags_readable else 'Privilege Escalation'}."
             ),
             "impact": (
+                f"Session duration: {features.get('session_duration','N/A')}s. "
                 f"Traffic: {features.get('network_traffic_volume','N/A')} bytes. "
-                f"Session: {features.get('session_duration','N/A')}s. "
-                f"Protocol: {features.get('protocol_type','TCP')}."
+                f"Sudo attempts: {features.get('sudo_attempt','N/A')}."
             ),
             "recommendations": (
-                f"1. Block {attacker_ip} at firewall.\n"
-                f"2. Audit '{attacker_username}' account.\n"
-                "3. Review /var/log/auth.log.\n4. Rotate SSH keys.\n5. File incident report."
+                "1. Audit all sudo usage — restrict COMMAND=/bin/bash.\n"
+                "2. Review /var/log/auth.log for all session opens as root.\n"
+                "3. Enforce sudo policy: require password for all commands.\n"
+                "4. Rotate credentials for: ubuntu, deploy, mayur, www-data.\n"
+                "5. Enable auditd for real-time privilege escalation alerts."
             ),
             "riskScore":    worst.get("risk_score", 0),
             "anomalyScore": worst.get("anomaly_score", 0),
@@ -447,10 +511,34 @@ def threat_scan(request: Request) -> Dict[str, Any]:
     except HTTPException:
         raise
     except Exception as e:
+        logger.error("/threat-scan error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get("/health")
+def health(request: Request) -> Dict[str, Any]:
+    try:
+        return {"status": "ok", "neo4j": test_connection(),
+                "model_loaded": request.app.state.model is not None}
+    except Exception:
+        return {"status": "ok", "neo4j": False, "model_loaded": False}
+
+
+@router.get("/dataset/logs")
+def dataset_logs() -> Dict[str, Any]:
+    """Return all raw log lines from the intrusion dataset."""
+    lines = get_all_log_lines()
+    return {"lines": lines, "count": len(lines)}
+
+
+@router.get("/dataset/rows")
+def dataset_rows(request: Request) -> Dict[str, Any]:
+    """Return all 70 dataset rows as JSON for frontend analytics."""
+    try:
+        df = request.app.state.df
+        rows = df.to_dict(orient="records")
+        return {"rows": rows, "count": len(rows)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 def health(request: Request) -> Dict[str, Any]:
     try:
         return {"status": "ok", "neo4j": test_connection(),

@@ -59,6 +59,7 @@ export default function HoneypotPage({ liveEvents = [] }) {
   const [simLog, setSimLog]         = useState([])
   const [selected, setSelected]     = useState(null)
   const [termLines, setTermLines]   = useState([])
+  const [datasetAttacks, setDatasetAttacks] = useState([])
   const termRef = useRef(null)
 
   const fetchState = async () => {
@@ -73,6 +74,17 @@ export default function HoneypotPage({ liveEvents = [] }) {
   useEffect(() => {
     fetchState()
     const t = setInterval(fetchState, 4000)
+    // Load real attack rows from dataset
+    fetch('http://localhost:8000/api/dataset/rows')
+      .then(r => r.json())
+      .then(d => {
+        const attacks = (d.rows || []).filter(r => Number(r.attack_detected||0) === 1 || Number(r.privilege_escalation||0) === 1)
+        setDatasetAttacks(attacks)
+        // Pre-populate terminal with real attack log lines
+        const lines = attacks.map(r => r.raw_log).filter(Boolean).slice(0, 10)
+        setTermLines(lines)
+      })
+      .catch(() => {})
     return () => clearInterval(t)
   }, [])
 
@@ -103,23 +115,26 @@ export default function HoneypotPage({ liveEvents = [] }) {
       const r = await api.post('/api/simulate', { count: 3 })
       const results = r.data
 
-      // Push each to ingest directly to trigger honeypot
-      for (const res of results) {
+      // Push real attack rows to ingest
+      const attacksToSend = datasetAttacks.slice(0, 3)
+      for (const row of attacksToSend) {
         try {
           await ingest.post('/ingest', {
-            ip: res.features?.src_ip ||
-              `${Math.floor(Math.random()*200)+10}.${Math.floor(Math.random()*254)+1}.${Math.floor(Math.random()*254)+1}.${Math.floor(Math.random()*254)+1}`,
-            device: res.features?.name || 'ATTACK_SIM',
-            request_count: 180,
+            ip: row.src_ip || '10.0.1.55',
+            device: row.name || 'Privilege Escalation',
+            request_count: Math.max(
+              Number(row.failed_logins||0) * 5 + Number(row.login_attempts||0) * 2 + Number(row.privilege_escalation||0) * 12,
+              50
+            ),
           })
         } catch {}
       }
 
       setTimeout(async () => {
         await fetchState()
-        // Show fake terminal commands for demo
-        const cmds = FAKE_COMMANDS.slice(0, 6)
-        setTermLines(cmds)
+        // Show real attack log lines in terminal
+        const lines = datasetAttacks.map(r => r.raw_log).filter(Boolean).slice(0, 8)
+        setTermLines(lines.length > 0 ? lines : FAKE_COMMANDS.slice(0, 6))
         setSimLog(p => [...p, 'Done. Check honeypot entries below.'])
         setSimulating(false)
       }, 3200)
@@ -340,6 +355,42 @@ export default function HoneypotPage({ liveEvents = [] }) {
                 <div className="text-[#94A3B8] text-[10px]">expires: {new Date(b.expires_at).toLocaleString()}</div>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Dataset attack events — real priv-esc logs */}
+      {datasetAttacks.length > 0 && (
+        <div className="rounded-xl border border-[#FF003C]/20 bg-[#FF003C]/5 p-5">
+          <div className="flex items-center gap-2 mb-4">
+            <i className="ph ph-shield-warning text-[#FF003C] text-base" />
+            <span className="text-[11px] font-bold text-[#94A3B8] uppercase tracking-widest mono-text">
+              Privilege Escalation Events — Dataset ({datasetAttacks.length} attacks)
+            </span>
+          </div>
+          <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+            {datasetAttacks.map((row, i) => {
+              const isShell = row.raw_log?.includes('COMMAND=/bin/bash') || row.raw_log?.includes('COMMAND=/bin/sh')
+              const isSession = row.raw_log?.toLowerCase().includes('session opened for user root')
+              const isFailed = row.raw_log?.toLowerCase().includes('incorrect password')
+              const type = isShell ? 'ROOT_SHELL_SPAWN' : isSession ? 'ROOT_SESSION_OPENED' : isFailed ? 'FAILED_SUDO' : 'PRIV_ESC'
+              const color = isShell ? '#FF003C' : isSession ? '#FF6B00' : '#FFEA00'
+              return (
+                <div key={i} className="rounded-lg border px-3 py-2 mono-text text-xs"
+                  style={{ borderColor: color+'30', backgroundColor: color+'08' }}>
+                  <div className="flex items-center justify-between gap-2 flex-wrap mb-1">
+                    <div className="flex items-center gap-2">
+                      <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: color }} />
+                      <span className="font-bold text-[9px] px-1.5 py-0.5 rounded border"
+                        style={{ color, borderColor: color+'44', backgroundColor: color+'10' }}>{type}</span>
+                      <span className="font-bold" style={{ color }}>{row.actor || 'unknown'}</span>
+                    </div>
+                    <span className="text-[#94A3B8] text-[10px]">{row.log_timestamp}</span>
+                  </div>
+                  <code className="text-[9px] text-[#94A3B8] break-all leading-relaxed">{row.raw_log}</code>
+                </div>
+              )
+            })}
           </div>
         </div>
       )}

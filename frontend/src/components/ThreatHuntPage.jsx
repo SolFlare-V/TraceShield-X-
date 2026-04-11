@@ -342,6 +342,35 @@ export default function ThreatHuntPage({ lastResult }) {
             </div>
           </div>
 
+          {/* Attackers identified from dataset */}
+          {data.attackers && data.attackers.length > 0 && (
+            <div className="cyber-panel p-6 border-t-2 border-t-[#FF003C]">
+              <div className="flex items-center gap-3 mb-5">
+                <div className="w-1 h-6 bg-[#FF003C] rounded-full" />
+                <h3 className="text-sm font-bold font-['Rajdhani'] uppercase tracking-widest text-white">
+                  Identified Attackers — {data.totalAttackEvents} Attack Events
+                </h3>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {data.attackers.map((atk, i) => (
+                  <div key={i} className="rounded-lg border border-[#FF003C]/30 bg-[#FF003C]/5 px-4 py-3 mono-text text-xs">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="w-2 h-2 rounded-full bg-[#FF003C] animate-pulse" />
+                      <span className="font-bold text-[#FF003C] text-sm">{atk.actor}</span>
+                      <span className="ml-auto text-[9px] text-[#94A3B8]">{atk.count} events</span>
+                    </div>
+                    <div className="text-[#94A3B8] text-[10px]">IP: <span className="text-[#E2E8F0]">{atk.ip || '—'}</span></div>
+                    <div className="text-[#94A3B8] text-[10px] mt-1 flex flex-wrap gap-1">
+                      {(atk.types || []).map((t, j) => (
+                        <span key={j} className="px-1.5 py-0.5 rounded bg-[#FF003C]/10 border border-[#FF003C]/20 text-[#FF003C]">{t}</span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Event timeline */}
           <div className="cyber-panel p-6 border-t-2 border-t-[#FFEA00]">
             <div className="flex items-center gap-3 mb-5">

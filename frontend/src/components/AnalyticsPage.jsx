@@ -155,41 +155,106 @@ function PulseGraph({ data, threshold = 75 }) {
 }
 
 export default function AnalyticsPage({ lastResult, liveEvents = [] }) {
-  const [pulseIndices, setPulseIndices] = useState(Array(20).fill(40).map(() => Math.floor(Math.random() * 30) + 20));
-  const [anomaliesDetected, setAnomaliesDetected] = useState(0);
-  const [ipTable, setIpTable] = useState(() => generateIpTable());
-  const [selectedCmd, setSelectedCmd] = useState(null);
+  const [pulseIndices, setPulseIndices] = useState(Array(20).fill(20))
+  const [anomaliesDetected, setAnomaliesDetected] = useState(0)
+  const [ipTable, setIpTable]   = useState([])
+  const [selectedCmd, setSelectedCmd] = useState(null)
+  const [datasetRows, setDatasetRows] = useState([])
+
+  // Load all 70 real rows on mount
+  useEffect(() => {
+    fetch('http://localhost:8000/api/dataset/rows')
+      .then(r => r.json())
+      .then(d => {
+        const rows = d.rows || []
+        setDatasetRows(rows)
+        // Build IP table from real rows
+        const table = rows.map(row => {
+          const failed   = Number(row.failed_logins  || 0)
+          const attempts = Number(row.login_attempts || 0)
+          const rep      = Number(row.ip_reputation_score || 0)
+          const odd      = Number(row.unusual_time_access || 0)
+          const session  = Number(row.session_duration || 0)
+          const requests = Number(row.network_traffic_volume || 0)
+          const priv     = Number(row.privilege_escalation || 0)
+          const sudo     = Number(row.sudo_attempt || 0)
+          const score    = Math.min(100, Math.round(
+            failed * 8 + rep * 30 + odd * 20 + priv * 35 + sudo * 10 +
+            (requests > 50000 ? 15 : 0)
+          ))
+          const triggered = []
+          if (failed > 0 && attempts > 1) triggered.push('BRUTE_FORCE')
+          if (rep > 0.6)                  triggered.push('LOW_REPUTATION_IP')
+          if (odd === 1)                  triggered.push('ODD_ACCESS_TIME')
+          if (session > 300)              triggered.push('LONG_SESSION')
+          if (priv === 1)                 triggered.push('PRIVILEGE_ESCALATION')
+          const cmds = priv === 1
+            ? FORENSIC_CMDS.filter(c => c.cmd === 'chmod 777' || c.cmd === 'history -c').slice(0,1)
+            : []
+          return {
+            ip: row.src_ip || '10.0.0.1',
+            requests: attempts + failed,
+            failedLogins: failed,
+            loginAttempts: attempts,
+            repScore: rep,
+            oddHours: odd,
+            sessionDur: session,
+            score,
+            level: scoreLevel(score),
+            triggered,
+            usedCmds: cmds.map(c => c.cmd),
+            actor: row.actor || 'system',
+            name: row.name || 'System Event',
+            rawLog: row.raw_log || '',
+          }
+        }).sort((a, b) => b.score - a.score)
+        setIpTable(table)
+        // Seed pulse graph with real scores
+        const scores = rows.map(r => Math.min(100, Math.round(
+          Number(r.privilege_escalation||0)*35 + Number(r.sudo_attempt||0)*10 + Number(r.failed_logins||0)*8
+        )))
+        const last20 = scores.slice(-20)
+        while (last20.length < 20) last20.unshift(5)
+        setPulseIndices(last20)
+        setAnomaliesDetected(rows.filter(r => Number(r.attack_detected||0) === 1).length)
+      })
+      .catch(() => {
+        setIpTable(generateIpTable())
+      })
+  }, [])
 
   // When a new real result comes in, push its risk_score into the pulse graph
   useEffect(() => {
     if (!lastResult) return
     const score = lastResult.risk_score ?? 0
     setPulseIndices(prev => {
-      const isAnomaly = score > 75
+      const isAnomaly = score > 35
       if (isAnomaly) setAnomaliesDetected(c => c + 1)
       return [...prev.slice(1), Math.round(score)]
     })
-    // Also inject the real result as a row in the IP table
     if (lastResult.features) {
       const f = lastResult.features
-      const ip = f.src_ip || `${Math.floor(Math.random()*200)+10}.${Math.floor(Math.random()*254)+1}.${Math.floor(Math.random()*254)+1}.${Math.floor(Math.random()*254)+1}`
-      const failedLogins  = f.failed_logins  || 0
-      const loginAttempts = f.login_attempts  || 0
-      const repScore      = f.ip_reputation_score ?? Math.random().toFixed(2) * 1
-      const oddHours      = f.unusual_time_access || 0
-      const sessionDur    = f.session_duration || 0
-      const requests      = f.network_traffic_volume ? Math.floor(f.network_traffic_volume / 1000) : 50
+      const ip = f.src_ip || '10.0.0.1'
+      const failed  = Number(f.failed_logins || 0)
+      const rep     = Number(f.ip_reputation_score || 0)
+      const odd     = Number(f.unusual_time_access || 0)
+      const session = Number(f.session_duration || 0)
+      const priv    = Number(f.privilege_escalation || 0)
+      const sudo    = Number(f.sudo_attempt || 0)
+      const score2  = Math.round(lastResult.risk_score || 0)
       const triggered = []
-      if (failedLogins > 5 && loginAttempts > 10) triggered.push('BRUTE_FORCE')
-      if (repScore < 0.3)                          triggered.push('LOW_REPUTATION_IP')
-      if (oddHours === 1)                          triggered.push('ODD_ACCESS_TIME')
-      if (sessionDur > 300)                        triggered.push('LONG_SESSION')
-      const score2 = Math.round(lastResult.risk_score || 0)
-      const newRow = { ip, requests, failedLogins, loginAttempts, repScore: parseFloat(repScore), oddHours, sessionDur, score: score2, level: scoreLevel(score2), triggered, usedCmds: [] }
-      setIpTable(prev => {
-        const filtered = prev.filter(r => r.ip !== ip)
-        return [newRow, ...filtered].slice(0, 15).sort((a, b) => b.score - a.score)
-      })
+      if (failed > 0) triggered.push('BRUTE_FORCE')
+      if (rep > 0.6)  triggered.push('LOW_REPUTATION_IP')
+      if (odd === 1)  triggered.push('ODD_ACCESS_TIME')
+      if (priv === 1) triggered.push('PRIVILEGE_ESCALATION')
+      const newRow = {
+        ip, requests: failed + Number(f.login_attempts||0),
+        failedLogins: failed, loginAttempts: Number(f.login_attempts||0),
+        repScore: rep, oddHours: odd, sessionDur: session,
+        score: score2, level: scoreLevel(score2), triggered, usedCmds: [],
+        actor: f.actor || 'unknown', name: f.name || 'Event', rawLog: f.raw_log || '',
+      }
+      setIpTable(prev => [newRow, ...prev.filter(r => r.ip !== ip)].slice(0, 70).sort((a,b) => b.score - a.score))
     }
   }, [lastResult])
 
@@ -200,7 +265,7 @@ export default function AnalyticsPage({ lastResult, liveEvents = [] }) {
     if (!latest) return
     const score = latest.risk_score ?? 0
     setPulseIndices(prev => {
-      const isAnomaly = score > 75
+      const isAnomaly = score > 35
       if (isAnomaly) setAnomaliesDetected(c => c + 1)
       return [...prev.slice(1), Math.round(score)]
     })
@@ -280,8 +345,7 @@ export default function AnalyticsPage({ lastResult, liveEvents = [] }) {
                 <div className="flex flex-col items-end">
                   <span className="text-[9px] text-[#94A3B8] mono-text uppercase">High_Risk</span>
                   <span className="text-sm font-bold text-[#FF003C] mono-text">{ipTable.filter(r => r.level === 'CRITICAL' || r.level === 'HIGH').length}</span>
-                </div>
-              </div>
+                </div>              </div>
            </div>
 
            {/* Forensic command keyword legend */}
@@ -539,19 +603,25 @@ function CmdModal({ cmd, onClose }) {
 
 function IpRow({ row, rank, onCmdClick }) {
   const color = scoreColor(row.level);
+  const [expanded, setExpanded] = useState(false);
   return (
-    <div className="grid grid-cols-12 gap-2 px-4 py-2.5 items-center hover:bg-[#0D1323]/60 transition-colors group">
-      {/* IP */}
+    <>
+    <div className="grid grid-cols-12 gap-2 px-4 py-2.5 items-center hover:bg-[#0D1323]/60 transition-colors group cursor-pointer"
+      onClick={() => setExpanded(e => !e)}>
+      {/* IP + actor */}
       <div className="col-span-2 flex items-center gap-2">
-        <span className="text-[9px] text-[#1E2D4A] mono-text font-bold w-4">#{rank}</span>
-        <span className="text-[11px] text-white mono-text font-bold">{row.ip}</span>
+        <span className="text-[9px] text-[#1E2D4A] mono-text w-4 text-right flex-shrink-0">{rank}</span>
+        <div className="min-w-0">
+          <div className="text-[11px] text-white mono-text font-bold truncate">{row.ip}</div>
+          <div className="text-[9px] text-[#94A3B8] mono-text truncate">{row.actor}</div>
+        </div>
       </div>
       {/* Requests */}
       <span className="col-span-1 text-[11px] text-[#94A3B8] mono-text">{row.requests}</span>
       {/* Failed logins */}
-      <span className={`col-span-1 text-[11px] mono-text font-bold ${row.failedLogins > 5 ? 'text-[#FF003C]' : 'text-[#94A3B8]'}`}>{row.failedLogins}</span>
+      <span className={`col-span-1 text-[11px] mono-text font-bold ${row.failedLogins > 0 ? 'text-[#FF003C]' : 'text-[#94A3B8]'}`}>{row.failedLogins}</span>
       {/* Rep score */}
-      <span className={`col-span-1 text-[11px] mono-text font-bold ${row.repScore < 0.3 ? 'text-[#FF003C]' : row.repScore < 0.6 ? 'text-[#FFEA00]' : 'text-[#39FF14]'}`}>{row.repScore.toFixed(2)}</span>
+      <span className={`col-span-1 text-[11px] mono-text font-bold ${row.repScore > 0.6 ? 'text-[#FF003C]' : row.repScore > 0.3 ? 'text-[#FFEA00]' : 'text-[#39FF14]'}`}>{row.repScore?.toFixed(2)}</span>
       {/* Score bar */}
       <div className="col-span-1 flex items-center gap-1.5">
         <span className="text-[11px] mono-text font-bold" style={{ color }}>{row.score}</span>
@@ -563,27 +633,36 @@ function IpRow({ row, rank, onCmdClick }) {
           {row.level}
         </span>
       </div>
-      {/* Triggered forensic commands */}
+      {/* Triggered flags */}
       <div className="col-span-5 flex flex-wrap gap-1.5 items-center">
-        {row.usedCmds.length === 0 ? (
-          <span className="text-[9px] text-[#1E2D4A] mono-text">— none detected</span>
-        ) : row.usedCmds.map(cmd => {
-          const fc = FORENSIC_CMDS.find(c => c.cmd === cmd);
+        {row.triggered.length === 0 ? (
+          <span className="text-[9px] text-[#1E2D4A] mono-text">— normal</span>
+        ) : row.triggered.map((flag, j) => {
+          const fc = FORENSIC_CMDS.find(c => c.cmd === 'chmod 777') // fallback
+          const flagColor = flag === 'PRIVILEGE_ESCALATION' ? '#FF003C'
+                          : flag === 'BRUTE_FORCE'          ? '#FF6B00'
+                          : flag === 'LOW_REPUTATION_IP'    ? '#FF003C'
+                          : flag === 'ODD_ACCESS_TIME'      ? '#FFEA00'
+                          : '#94A3B8'
           return (
-            <code key={cmd} onClick={() => onCmdClick(fc)}
-              className="text-[9px] font-bold mono-text px-2 py-0.5 rounded border flex items-center gap-1 cursor-pointer hover:scale-105 transition-transform"
-              style={{ color: fc.color, borderColor: fc.color + '44', backgroundColor: fc.color + '10' }}>
-              <i className="ph ph-terminal-window text-[9px]" />
-              {cmd}
-            </code>
-          );
+            <span key={j} className="text-[9px] font-bold mono-text px-2 py-0.5 rounded border"
+              style={{ color: flagColor, borderColor: flagColor+'44', backgroundColor: flagColor+'10' }}>
+              {flag.replace(/_/g,' ')}
+            </span>
+          )
         })}
       </div>
     </div>
+    {expanded && row.rawLog && (
+      <div className="px-4 pb-3 bg-[#070B14]/60 border-b border-[#1E2D4A]/30">
+        <code className="text-[9px] text-[#B026FF] mono-text break-all">{row.rawLog}</code>
+      </div>
+    )}
+    </>
   );
 }
 
-// Sample log lines per event type
+// Sample log lines per event type — real dataset patterns
 const EVENT_LOGS = {
   LOGIN:       [ 'auth.log: sshd[4821]: Accepted password for root from 10.0.0.42 port 22',
                  'auth.log: sshd[3901]: pam_unix(sshd:session): session opened for user admin',
@@ -597,15 +676,15 @@ const EVENT_LOGS = {
   LOG_CLEAR:   [ 'syslog: COMMAND: rm -rf /var/log/auth.log by uid=0',
                  'syslog: COMMAND: history -c executed by bash pid=7741',
                  'syslog: wevtutil.exe cl Security — event log cleared by SYSTEM' ],
-  PRIV_ESC:    [ 'auth.log: sudo: user01 : TTY=pts/0 ; COMMAND=/bin/bash',
-                 'audit.log: type=SYSCALL exe="/usr/bin/sudo" uid=1001 euid=0',
-                 'syslog: COMMAND: chmod 4755 /tmp/shell by uid=1001' ],
+  PRIV_ESC:    [ 'Apr 11 00:49:49 ubuntu-server sudo: ubuntu : TTY=pts/1 ; PWD=/home/ubuntu ; USER=root ; COMMAND=/bin/bash',
+                 'Apr 11 00:50:27 ubuntu-server sudo: deploy : TTY=pts/1 ; PWD=/home/deploy ; USER=root ; COMMAND=/bin/bash',
+                 'Apr 11 00:50:08 ubuntu-server sudo: pam_unix(sudo:session): session opened for user root by mayur(uid=1000)' ],
   EXFIL:       [ 'netflow: 10.0.0.42:443 -> 185.220.101.9:443 bytes=4194304 (4MB)',
                  'dns.log: query AAAA evil-c2.xyz from 10.0.0.42 (suspicious domain)',
                  'audit.log: type=CONNECT fd=3 addr=185.220.101.9 port=4444' ],
-  NORMAL:      [ 'syslog: cron[1234]: (root) CMD (/usr/lib/cron/run-crons)',
-                 'syslog: systemd[1]: Started Session 42 of user www-data',
-                 'auth.log: sshd[2201]: Disconnected from user deploy 10.0.0.5 port 22' ],
+  NORMAL:      [ 'Apr 11 00:32:23 ubuntu-server nginx: nginx[3386]: worker process 3386 exited on signal 15',
+                 'Apr 11 00:37:12 ubuntu-server systemd: systemd[1]: Reached target Multi-User System.',
+                 'Apr 11 00:35:47 ubuntu-server CRON: CRON[8331]: (root) CMD (test -x /usr/sbin/anacron)' ],
 };
 
 // Short code shown on the shape
