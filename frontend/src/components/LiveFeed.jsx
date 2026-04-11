@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 
 const STATUS_COLORS = {
   EXTREME_RISK: { bg: 'bg-red-950/40',    text: 'text-red-400',    border: 'border-red-800/60',    dot: 'bg-red-500' },
@@ -28,57 +28,11 @@ function ActionBadge({ action }) {
  *
  * Falls back to local state if props not provided.
  */
-export default function LiveFeed({ events: externalEvents, onEvents }) {
+export default function LiveFeed({ events: externalEvents, onEvents, wsStatus = 'disconnected' }) {
   const [localEvents, setLocalEvents] = useState([])
-  const [wsStatus, setWsStatus]       = useState('disconnected')
-  const wsRef = useRef(null)
 
   // Use external (App-level) state if provided, else local
   const events    = externalEvents ?? localEvents
-  const setEvents = onEvents       ?? setLocalEvents
-
-  useEffect(() => {
-    let reconnectTimer = null
-
-    function connect() {
-      try {
-        const ws = new WebSocket('ws://127.0.0.1:8001/ws')
-        wsRef.current = ws
-
-        ws.onopen = () => setWsStatus('connected')
-
-        ws.onmessage = (e) => {
-          try {
-            const event = JSON.parse(e.data)
-            setEvents(prev => {
-              const key = `${event.ip}-${event.timestamp}`
-              if (prev.some(p => `${p.ip}-${p.timestamp}` === key)) return prev
-              return [event, ...prev].slice(0, MAX_EVENTS)
-            })
-          } catch { /* ignore malformed */ }
-        }
-
-        ws.onclose = () => {
-          setWsStatus('disconnected')
-          reconnectTimer = setTimeout(connect, 3000)
-        }
-
-        ws.onerror = () => {
-          setWsStatus('error')
-          ws.close()
-        }
-      } catch {
-        setWsStatus('error')
-        reconnectTimer = setTimeout(connect, 5000)
-      }
-    }
-
-    connect()
-    return () => {
-      clearTimeout(reconnectTimer)
-      if (wsRef.current) wsRef.current.close()
-    }
-  }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
   const wsIndicator = {
     connected:    { color: 'text-[#39FF14]', dot: 'bg-[#39FF14]', pulse: true,  label: 'Live: Connected' },

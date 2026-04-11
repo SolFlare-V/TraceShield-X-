@@ -357,7 +357,7 @@ function generateBatch(sourceId, count = 80) {
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
-export default function DataLogsPage() {
+export default function DataLogsPage({ liveEvents = [] }) {
   const [activeSource, setActiveSource]   = useState('auth');
   const [logs, setLogs]                   = useState(() => generateBatch('auth'));
   const [levelFilter, setLevelFilter]     = useState('ALL');
@@ -410,6 +410,45 @@ export default function DataLogsPage() {
 
   return (
     <div className="animate-fadeIn flex flex-col gap-0 h-full" style={{ minHeight: '80vh' }}>
+      {/* Real ingest events panel */}
+      {liveEvents.length > 0 && (
+        <div className="rounded-xl border border-[#1E2D4A] bg-[#0D1323]/60 p-5 mb-6">
+          <div className="flex items-center gap-2 mb-3">
+            <i className="ph ph-broadcast text-[#00F0FF] text-base" />
+            <span className="text-[11px] font-bold text-[#94A3B8] uppercase tracking-widest mono-text">
+              Live Ingest Events
+            </span>
+            <span className="ml-auto text-[10px] text-[#00F0FF] mono-text">{liveEvents.length} events</span>
+          </div>
+          <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+            {liveEvents.slice(0, 20).map((ev, i) => {
+              const m = STATUS_META[ev.status] || STATUS_META.NORMAL
+              return (
+                <div key={i} className={`rounded-lg border px-3 py-2 text-xs mono-text ${m.bg} ${m.border}`}>
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${m.dot}`} />
+                      <span className={`font-bold ${m.color}`}>{ev.status}</span>
+                      <span className="text-[#94A3B8]">{ev.ip}</span>
+                      <span className="text-[#1E2D4A]">→</span>
+                      <span className="text-[#E2E8F0]">{ev.device}</span>
+                    </div>
+                    <div className="flex items-center gap-3 text-[10px] text-[#94A3B8]">
+                      <span>score <span className="text-white font-bold">{ev.risk_score?.toFixed(1)}</span></span>
+                      <span>ml <span className="text-[#00F0FF]">{ev.ml_score?.toFixed(1)}</span></span>
+                      <span>{new Date(ev.timestamp).toLocaleTimeString()}</span>
+                    </div>
+                  </div>
+                  {ev.reason && ev.reason !== 'N/A' && (
+                    <div className="text-[10px] text-[#94A3B8] mt-1 truncate">{ev.reason}</div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Log file upload panel */}
       <LogUploadPanel />
 

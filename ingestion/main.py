@@ -175,7 +175,6 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.receive_text()   # keep alive
     except WebSocketDisconnect:
         _ws_manager.disconnect(websocket)
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
 
 
 @app.get("/events/recent")

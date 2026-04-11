@@ -1,4 +1,7 @@
 import React, { useEffect, useState } from 'react';
+import axios from 'axios';
+
+const ingest = axios.create({ baseURL: 'http://127.0.0.1:8001' });
 
 function PulseGraph({ data, threshold = 75 }) {
   const [hoveredIndex, setHoveredIndex] = useState(null);
@@ -151,47 +154,57 @@ function PulseGraph({ data, threshold = 75 }) {
   );
 }
 
-export default function AnalyticsPage() {
+export default function AnalyticsPage({ lastResult, liveEvents = [] }) {
   const [pulseIndices, setPulseIndices] = useState(Array(20).fill(40).map(() => Math.floor(Math.random() * 30) + 20));
   const [anomaliesDetected, setAnomaliesDetected] = useState(0);
   const [ipTable, setIpTable] = useState(() => generateIpTable());
   const [selectedCmd, setSelectedCmd] = useState(null);
 
+  // When a new real result comes in, push its risk_score into the pulse graph
   useEffect(() => {
-    const interval = setInterval(() => {
-      setPulseIndices(prev => {
-        const isAnomaly = Math.random() > 0.92;
-        if (isAnomaly) setAnomaliesDetected(c => c + 1);
-        const newVal = isAnomaly ? Math.floor(Math.random() * 20) + 75 : Math.floor(Math.random() * 20) + 25;
-        return [...prev.slice(1), newVal];
-      });
-    }, 1500);
-    return () => clearInterval(interval);
-  }, []);
-
-  // Periodically update one random IP's score to simulate live feed
-  useEffect(() => {
-    const interval = setInterval(() => {
+    if (!lastResult) return
+    const score = lastResult.risk_score ?? 0
+    setPulseIndices(prev => {
+      const isAnomaly = score > 75
+      if (isAnomaly) setAnomaliesDetected(c => c + 1)
+      return [...prev.slice(1), Math.round(score)]
+    })
+    // Also inject the real result as a row in the IP table
+    if (lastResult.features) {
+      const f = lastResult.features
+      const ip = f.src_ip || `${Math.floor(Math.random()*200)+10}.${Math.floor(Math.random()*254)+1}.${Math.floor(Math.random()*254)+1}.${Math.floor(Math.random()*254)+1}`
+      const failedLogins  = f.failed_logins  || 0
+      const loginAttempts = f.login_attempts  || 0
+      const repScore      = f.ip_reputation_score ?? Math.random().toFixed(2) * 1
+      const oddHours      = f.unusual_time_access || 0
+      const sessionDur    = f.session_duration || 0
+      const requests      = f.network_traffic_volume ? Math.floor(f.network_traffic_volume / 1000) : 50
+      const triggered = []
+      if (failedLogins > 5 && loginAttempts > 10) triggered.push('BRUTE_FORCE')
+      if (repScore < 0.3)                          triggered.push('LOW_REPUTATION_IP')
+      if (oddHours === 1)                          triggered.push('ODD_ACCESS_TIME')
+      if (sessionDur > 300)                        triggered.push('LONG_SESSION')
+      const score2 = Math.round(lastResult.risk_score || 0)
+      const newRow = { ip, requests, failedLogins, loginAttempts, repScore: parseFloat(repScore), oddHours, sessionDur, score: score2, level: scoreLevel(score2), triggered, usedCmds: [] }
       setIpTable(prev => {
-        const idx = Math.floor(Math.random() * prev.length);
-        const updated = [...prev];
-        const entry = { ...updated[idx] };
-        entry.score = Math.min(100, Math.max(0, entry.score + (Math.random() > 0.5 ? 1 : -1) * Math.floor(Math.random() * 8)));
-        entry.requests += Math.floor(Math.random() * 5);
-        entry.level = scoreLevel(entry.score);
-        // Recalculate triggered keywords
-        const triggered = [];
-        if (entry.failedLogins > 5 && entry.loginAttempts > 10) triggered.push('BRUTE_FORCE');
-        if (entry.repScore < 0.3)                                triggered.push('LOW_REPUTATION_IP');
-        if (entry.oddHours === 1)                                triggered.push('ODD_ACCESS_TIME');
-        if (entry.sessionDur > 300)                              triggered.push('LONG_SESSION');
-        entry.triggered = triggered;
-        updated[idx] = entry;
-        return updated.sort((a, b) => b.score - a.score);
-      });
-    }, 2000);
-    return () => clearInterval(interval);
-  }, []);
+        const filtered = prev.filter(r => r.ip !== ip)
+        return [newRow, ...filtered].slice(0, 15).sort((a, b) => b.score - a.score)
+      })
+    }
+  }, [lastResult])
+
+  // Feed live WS events into pulse graph
+  useEffect(() => {
+    if (!liveEvents.length) return
+    const latest = liveEvents[0]
+    if (!latest) return
+    const score = latest.risk_score ?? 0
+    setPulseIndices(prev => {
+      const isAnomaly = score > 75
+      if (isAnomaly) setAnomaliesDetected(c => c + 1)
+      return [...prev.slice(1), Math.round(score)]
+    })
+  }, [liveEvents])
 
   return (
     <div className="animate-fadeIn space-y-8 pb-10">

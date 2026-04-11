@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import axios from 'axios'
 import RiskCard from './components/RiskCard'
 import AlertFeed from './components/AlertFeed'
@@ -9,6 +9,7 @@ import HomePage from './components/HomePage'
 import AnalyticsPage from './components/AnalyticsPage'
 import DataLogsPage from './components/DataLogsPage'
 import ThreatHuntPage from './components/ThreatHuntPage'
+import HoneypotPage from './components/HoneypotPage'
 
 const api    = axios.create({ baseURL: 'http://localhost:8000' })
 const ingest = axios.create({ baseURL: 'http://127.0.0.1:8001' })
@@ -48,6 +49,62 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   // Shared event state — persists across page navigation
   const [liveEvents, setLiveEvents] = useState([])
+  const [wsStatus, setWsStatus]     = useState('disconnected')
+  const wsRef = useRef(null)
+
+  // Single persistent WebSocket — lives for the entire app lifetime
+  useEffect(() => {
+    let reconnectTimer = null
+    let destroyed = false
+
+    function connect() {
+      if (destroyed) return
+      try {
+        const ws = new WebSocket('ws://127.0.0.1:8001/ws')
+        wsRef.current = ws
+
+        ws.onopen = () => { if (!destroyed) setWsStatus('connected') }
+
+        ws.onmessage = (e) => {
+          if (destroyed) return
+          try {
+            const event = JSON.parse(e.data)
+            setLiveEvents(prev => {
+              const key = `${event.ip}-${event.timestamp}`
+              if (prev.some(p => `${p.ip}-${p.timestamp}` === key)) return prev
+              return [event, ...prev].slice(0, MAX_EVENTS)
+            })
+          } catch { /* ignore malformed */ }
+        }
+
+        ws.onclose = () => {
+          if (destroyed) return
+          setWsStatus('disconnected')
+          reconnectTimer = setTimeout(connect, 3000)
+        }
+
+        ws.onerror = () => {
+          // suppress — onclose will fire next and handle reconnect
+          ws.close()
+        }
+      } catch {
+        if (!destroyed) {
+          setWsStatus('error')
+          reconnectTimer = setTimeout(connect, 5000)
+        }
+      }
+    }
+
+    connect()
+    return () => {
+      destroyed = true
+      clearTimeout(reconnectTimer)
+      if (wsRef.current) {
+        wsRef.current.onclose = null  // prevent reconnect on intentional close
+        wsRef.current.close()
+      }
+    }
+  }, [])
 
   // Fetch recent events on mount so history is available immediately
   useEffect(() => {
@@ -167,8 +224,9 @@ export default function App() {
           <NavItem icon="ph-house" label="Home" active={view === 'home'} onClick={() => setView('home')} collapsed={sidebarCollapsed} />
           <NavItem icon="ph-squares-four" label="Dashboard" active={view === 'dashboard'} onClick={() => setView('dashboard')} collapsed={sidebarCollapsed} />
           <NavItem icon="ph-chart-bar" label="Analytics" active={view === 'analytics'} onClick={() => setView('analytics')} collapsed={sidebarCollapsed} />
-          <NavItem icon="ph-shield-warning" label="Threat Hunt" active={view === 'threat'} onClick={() => setView('threat')} collapsed={sidebarCollapsed} />
-          <NavItem icon="ph-terminal-window" label="Data Logs" active={view === 'logs'} onClick={() => setView('logs')} collapsed={sidebarCollapsed} />
+          <NavItem icon="ph-shield-warning" label="Threat Hunt" active={view === 'threat'}   onClick={() => setView('threat')}   collapsed={sidebarCollapsed} />
+          <NavItem icon="ph-terminal-window" label="Data Logs"  active={view === 'logs'}     onClick={() => setView('logs')}     collapsed={sidebarCollapsed} />
+          <NavItem icon="ph-bug"             label="Honeypot"   active={view === 'honeypot'} onClick={() => setView('honeypot')} collapsed={sidebarCollapsed} />
         </nav>
 
         <div className="p-3 border-t border-[#1E2D4A] bg-[#070B14]/30">
@@ -200,7 +258,7 @@ export default function App() {
               <span className="text-[10px] font-bold text-[#00F0FF] mono-text tracking-widest uppercase bg-[#00F0FF]/10 px-2 py-0.5 rounded">Core_System</span>
               <span className="text-[#1E2D4A] text-xs">/</span>
                <span className="text-[10px] font-bold text-[#94A3B8] mono-text tracking-widest uppercase">
-                 {view === 'home' ? 'System_Manual' : view === 'analytics' ? 'Predictive_Data' : view === 'logs' ? 'Event_Viewer' : view === 'threat' ? 'Threat_Hunt' : 'Forensic_Output'}
+                 {view === 'home' ? 'System_Manual' : view === 'analytics' ? 'Predictive_Data' : view === 'logs' ? 'Event_Viewer' : view === 'threat' ? 'Threat_Hunt' : view === 'honeypot' ? 'Honeypot_Trap' : 'Forensic_Output'}
                </span>
             </div>
             <div className="flex items-center gap-2 mt-0.5">
@@ -235,11 +293,13 @@ export default function App() {
             {view === 'home' ? (
               <HomePage onStart={() => setView('dashboard')} />
             ) : view === 'analytics' ? (
-              <AnalyticsPage />
+              <AnalyticsPage lastResult={result} liveEvents={liveEvents} />
             ) : view === 'logs' ? (
-              <DataLogsPage />
+              <DataLogsPage liveEvents={liveEvents} />
             ) : view === 'threat' ? (
-              <ThreatHuntPage />
+              <ThreatHuntPage lastResult={result} />
+            ) : view === 'honeypot' ? (
+              <HoneypotPage liveEvents={liveEvents} />
             ) : (
               <>
                 {/* Page Header */}
@@ -322,7 +382,7 @@ export default function App() {
                 )}
 
                 {/* Live Event Stream — always visible */}
-                <LiveFeed events={liveEvents} onEvents={setLiveEvents} />
+                <LiveFeed events={liveEvents} onEvents={setLiveEvents} wsStatus={wsStatus} />
 
                 {/* Active Threat State — blocked / honeypot / flagged IPs */}
                 <ThreatStatePanel />
