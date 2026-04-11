@@ -28,14 +28,14 @@ INGEST_URL = "http://127.0.0.1:8001/ingest"
 
 try:
     from backend.core.ml_model      import get_sample_row
-    from backend.core.simulation    import generate_synthetic_logs, generate_attack_scenario
+    from backend.core.simulation    import generate_synthetic_logs, generate_attack_scenario, get_all_log_lines
     from backend.core.graph_builder import get_attack_graph, clear_graph
     from backend.core.summarizer    import generate_timeline
     from backend.core.neo4j_db      import test_connection
     from backend.core.risk          import get_risk_color
 except ImportError:
     from core.ml_model      import get_sample_row
-    from core.simulation    import generate_synthetic_logs, generate_attack_scenario
+    from core.simulation    import generate_synthetic_logs, generate_attack_scenario, get_all_log_lines
     from core.graph_builder import get_attack_graph, clear_graph
     from core.summarizer    import generate_timeline
     from core.neo4j_db      import test_connection
@@ -158,18 +158,21 @@ def _derive_flags(row: Dict[str, Any], reason: str) -> List[str]:
         flags.append("LONG_SESSION")
     if row.get("network_traffic_volume", 0) > 50000:
         flags.append("DATA_EXFILTRATION")
+    if row.get("privilege_escalation", 0) == 1 or row.get("sudo_attempt", 0) == 1:
+        flags.append("PRIVILEGE_ESCALATION")
     if "spike" in reason or "trend" in reason:
         flags.append("TRAFFIC_SPIKE")
     return flags
 
 
 _FLAG_READABLE = {
-    "BRUTE_FORCE":       "Brute Force Attack",
-    "LOW_REPUTATION_IP": "Suspicious IP Address",
-    "ODD_ACCESS_TIME":   "Unusual Access Time",
-    "LONG_SESSION":      "Abnormal Session Duration",
-    "DATA_EXFILTRATION": "Possible Data Exfiltration",
-    "TRAFFIC_SPIKE":     "Traffic Spike Detected",
+    "BRUTE_FORCE":          "Brute Force Attack",
+    "LOW_REPUTATION_IP":    "Suspicious IP Address",
+    "ODD_ACCESS_TIME":      "Unusual Access Time",
+    "LONG_SESSION":         "Abnormal Session Duration",
+    "DATA_EXFILTRATION":    "Possible Data Exfiltration",
+    "TRAFFIC_SPIKE":        "Traffic Spike Detected",
+    "PRIVILEGE_ESCALATION": "Privilege Escalation Detected",
 }
 
 def _readable_flags(flags: List[str]) -> List[str]:
@@ -454,3 +457,10 @@ def health(request: Request) -> Dict[str, Any]:
                 "model_loaded": request.app.state.model is not None}
     except Exception:
         return {"status": "ok", "neo4j": False, "model_loaded": False}
+
+
+@router.get("/dataset/logs")
+def dataset_logs() -> Dict[str, Any]:
+    """Return all raw log lines from the intrusion dataset."""
+    lines = get_all_log_lines()
+    return {"lines": lines, "count": len(lines)}

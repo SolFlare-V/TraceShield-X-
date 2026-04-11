@@ -357,44 +357,112 @@ function generateBatch(sourceId, count = 80) {
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
+const api = axios.create({ baseURL: 'http://localhost:8000' })
+
+// Parse a raw syslog line into a log entry object
+let _idCtr = 1
+function parseRawLine(raw, sourceId = 'auth') {
+  const now = new Date()
+  // Detect level from content
+  let level = 'INFO'
+  if (/COMMAND=\/bin\/bash|COMMAND=\/bin\/sh|session opened for user root/i.test(raw)) level = 'CRITICAL'
+  else if (/incorrect password|Failed password|authentication failure/i.test(raw)) level = 'ERROR'
+  else if (/sudo.*COMMAND=|pam_unix.*sudo/i.test(raw)) level = 'WARNING'
+  else if (/CRON|NetworkManager|nginx.*exited/i.test(raw)) level = 'DEBUG'
+
+  // Detect source
+  let src = sourceId
+  if (/sudo:|pam_unix|sshguard/i.test(raw)) src = 'auth'
+  else if (/nginx|NetworkManager/i.test(raw)) src = 'syslog'
+  else if (/CRON/i.test(raw)) src = 'cron'
+  else if (/kernel|UFW/i.test(raw)) src = 'kern'
+  else if (/audit/i.test(raw)) src = 'audit'
+
+  const srcMeta = LOG_SOURCES.find(s => s.id === src) || LOG_SOURCES[0]
+  return {
+    id: _idCtr++,
+    ts: now,
+    tsStr: raw.match(/^(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})/)?.[1] || fmtTs(now),
+    source: src,
+    sourcePath: srcMeta.path,
+    level,
+    msg: raw,
+    pid: Math.floor(Math.random() * 9000) + 1000,
+    host: 'ubuntu-server',
+    raw,
+  }
+}
+
 export default function DataLogsPage({ liveEvents = [] }) {
   const [activeSource, setActiveSource]   = useState('auth');
-  const [logs, setLogs]                   = useState(() => generateBatch('auth'));
+  const [logs, setLogs]                   = useState([]);
+  const [allRealLogs, setAllRealLogs]     = useState([]);
   const [levelFilter, setLevelFilter]     = useState('ALL');
   const [search, setSearch]               = useState('');
   const [selectedLog, setSelectedLog]     = useState(null);
-  const [liveMode, setLiveMode]           = useState(true);
+  const [liveMode, setLiveMode]           = useState(false);
   const [sourceCounts, setSourceCounts]   = useState({});
   const tableRef = useRef(null);
 
-  // Generate counts per source
+  // Load real log lines from backend on mount
   useEffect(() => {
-    const counts = {};
-    LOG_SOURCES.forEach(s => {
-      counts[s.id] = { total: rnd(120, 4000), critical: rnd(0, 12), error: rnd(0, 30) };
-    });
-    setSourceCounts(counts);
+    api.get('/api/dataset/logs')
+      .then(r => {
+        const parsed = (r.data.lines || []).map(l => parseRawLine(l))
+        setAllRealLogs(parsed)
+        setLogs(parsed)
+        // Build source counts from real data
+        const counts = {}
+        LOG_SOURCES.forEach(s => {
+          const src = parsed.filter(l => l.source === s.id)
+          counts[s.id] = {
+            total: src.length || rnd(10, 80),
+            critical: src.filter(l => l.level === 'CRITICAL').length,
+            error: src.filter(l => l.level === 'ERROR').length,
+          }
+        })
+        setSourceCounts(counts)
+      })
+      .catch(() => {
+        // fallback to synthetic if backend not available
+        const batch = generateBatch('auth', 80)
+        setLogs(batch)
+        setAllRealLogs(batch)
+        const counts = {}
+        LOG_SOURCES.forEach(s => {
+          counts[s.id] = { total: rnd(120, 4000), critical: rnd(0, 12), error: rnd(0, 30) }
+        })
+        setSourceCounts(counts)
+      })
   }, []);
 
-  // Switch source
+  // Filter by source tab
   useEffect(() => {
-    setLogs(generateBatch(activeSource, 80));
-    setSelectedLog(null);
-    setLevelFilter('ALL');
-    setSearch('');
-  }, [activeSource]);
+    if (allRealLogs.length > 0) {
+      const filtered = activeSource === 'auth'
+        ? allRealLogs  // auth shows all real logs
+        : allRealLogs.filter(l => l.source === activeSource)
+      setLogs(filtered.length > 0 ? filtered : allRealLogs)
+    } else {
+      setLogs(generateBatch(activeSource, 80))
+    }
+    setSelectedLog(null)
+    setLevelFilter('ALL')
+    setSearch('')
+  }, [activeSource, allRealLogs]);
 
-  // Live mode — append a new log every 2s
+  // Live mode — inject liveEvents as new log entries
   useEffect(() => {
-    if (!liveMode) return;
-    const interval = setInterval(() => {
-      setLogs(prev => {
-        const newLog = generateLog(activeSource);
-        return [newLog, ...prev].slice(0, 200);
-      });
-    }, 2000);
-    return () => clearInterval(interval);
-  }, [liveMode, activeSource]);
+    if (!liveMode || liveEvents.length === 0) return
+    const latest = liveEvents[0]
+    if (!latest) return
+    const raw = `Apr 11 ${new Date().toTimeString().slice(0,8)} ubuntu-server [LIVE] ${latest.status} | ip=${latest.ip} device=${latest.device} score=${latest.risk_score?.toFixed(1)} reason=${latest.reason || 'N/A'}`
+    const entry = parseRawLine(raw, 'auth')
+    entry.level = latest.status === 'EXTREME_RISK' ? 'CRITICAL'
+                : latest.status === 'HIGH_RISK'    ? 'ERROR'
+                : latest.status === 'SUSPICIOUS'   ? 'WARNING' : 'INFO'
+    setLogs(prev => [entry, ...prev].slice(0, 200))
+  }, [liveEvents, liveMode]);
 
   const filtered = logs.filter(l => {
     if (levelFilter !== 'ALL' && l.level !== levelFilter) return false;
@@ -461,7 +529,7 @@ export default function DataLogsPage({ liveEvents = [] }) {
           <p className="text-[#94A3B8] mt-1 mono-text text-sm">Linux log inspector — /var/log/* · Real-time stream</p>
         </div>
         <div className="flex items-center gap-3">
-          <button onClick={() => setLogs(generateBatch(activeSource, 80))}
+          <button onClick={() => { api.get('/api/dataset/logs').then(r => { const p = (r.data.lines||[]).map(l=>parseRawLine(l)); setAllRealLogs(p); setLogs(p) }).catch(()=>setLogs(generateBatch(activeSource,80))) }}
             className="cyber-btn h-9 px-4 text-[11px]">
             <i className="ph ph-arrows-clockwise text-sm" /> Refresh
           </button>
