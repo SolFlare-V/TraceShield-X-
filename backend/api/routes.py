@@ -56,12 +56,23 @@ def _delegate_to_ingest(row: Dict[str, Any]) -> Dict[str, Any]:
     )
     device = row.get("name") or row.get("protocol_type", "UNKNOWN")
 
-    # request_count: use login_attempts as primary signal, capped at 200
+    # request_count: weight attack signals properly
     failed   = int(row.get("failed_logins", 0) or 0)
     attempts = int(row.get("login_attempts", 0) or 0)
     traffic  = int(row.get("network_traffic_volume", 0) or 0)
+    priv_esc = int(row.get("privilege_escalation", 0) or 0)
+    sudo_att = int(row.get("sudo_attempt", 0) or 0)
+    unusual  = int(row.get("unusual_time_access", 0) or 0)
     request_count = min(
-        max(failed * 3 + attempts * 2 + (traffic // 20000), attempts, 1),
+        max(
+            failed * 8 +
+            attempts * 3 +
+            priv_esc * 60 +   # priv-esc = very high intensity
+            sudo_att * 20 +   # sudo abuse = high
+            unusual * 15 +
+            (traffic // 10000),
+            attempts, 1
+        ),
         200,
     )
 
@@ -148,9 +159,9 @@ def _delegate_to_ingest(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def _derive_flags(row: Dict[str, Any], reason: str) -> List[str]:
     flags = []
-    if row.get("failed_logins", 0) > 3 or row.get("login_attempts", 0) > 8:
+    if row.get("failed_logins", 0) > 0 or row.get("login_attempts", 0) > 3:
         flags.append("BRUTE_FORCE")
-    if row.get("ip_reputation_score", 1.0) < 0.4:
+    if row.get("ip_reputation_score", 0.0) > 0.6:   # high score = malicious in this dataset
         flags.append("LOW_REPUTATION_IP")
     if row.get("unusual_time_access", 0) == 1:
         flags.append("ODD_ACCESS_TIME")

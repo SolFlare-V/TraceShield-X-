@@ -621,8 +621,7 @@ function IpRow({ row, rank, onCmdClick }) {
       {/* Failed logins */}
       <span className={`col-span-1 text-[11px] mono-text font-bold ${row.failedLogins > 0 ? 'text-[#FF003C]' : 'text-[#94A3B8]'}`}>{row.failedLogins}</span>
       {/* Rep score */}
-      <span className={`col-span-1 text-[11px] mono-text font-bold ${row.repScore > 0.6 ? 'text-[#FF003C]' : row.repScore > 0.3 ? 'text-[#FFEA00]' : 'text-[#39FF14]'}`}>{row.repScore?.toFixed(2)}</span>
-      {/* Score bar */}
+      <span className={`col-span-1 text-[11px] mono-text font-bold ${row.repScore > 0.6 ? 'text-[#FF003C]' : row.repScore > 0.3 ? 'text-[#FFEA00]' : 'text-[#39FF14]'}`}>{row.repScore?.toFixed(2)}</span>      {/* Score bar */}
       <div className="col-span-1 flex items-center gap-1.5">
         <span className="text-[11px] mono-text font-bold" style={{ color }}>{row.score}</span>
       </div>
